@@ -1,0 +1,46 @@
+{
+  "id": "email-watch-renewal",
+  "name": "Email Watch Renewal",
+  "description": "Renews the Gmail Pub/Sub watch for fluffles@puffle.ai.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "schedule",
+      "cron": "42 5 * * *",
+      "tz": "America/Los_Angeles"
+    },
+    {
+      "kind": "manual"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "renew-gmail-watch",
+      "argv": [
+        "{{ROOT}}/bin/breadcrumb",
+        "run",
+        "--scope",
+        "fluffles",
+        "--component",
+        "email",
+        "--kind",
+        "automation.run",
+        "--subject",
+        "email-watch-renewal",
+        "--source",
+        "automations",
+        "--",
+        "/bin/sh",
+        "-lc",
+        "{{ROOT}}/bin/gws gmail users watch --params '{\"userId\":\"me\"}' --json '{\"labelIds\":[\"INBOX\"],\"topicName\":\"projects/your-gcp-project/topics/fluffles-gmail-inbound\"}'"
+      ],
+      "cwd": "{{ROOT}}",
+      "timeoutMs": 60000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 1
+  }
+}

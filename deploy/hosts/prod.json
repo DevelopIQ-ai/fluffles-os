@@ -1,0 +1,23 @@
+{
+  "$comment": [
+    "Production: the Mac mini. Its services are system daemons so they survive",
+    "logout, which is why the deployer needs sudo for launchctl here."
+  ],
+  "name": "prod",
+  "home": "/Users/ai",
+  "user": "ai",
+  "group": "staff",
+  "repo": "/Users/ai/projects/source-code",
+  "ref": "origin/main",
+  "labelPrefix": "com.puffle",
+  "supervisor": "launchd",
+  "domain": "system",
+  "systemDaemonRoot": "/Library/LaunchDaemons",
+  "alertChannel": "#agent-alerts",
+  "services": ["slack", "email", "phone", "chat-console", "webhooks", "automations", "executor", "deploy-main"],
+  "env": {
+    "phone": {
+      "PHONE_EXECUTOR_MCP_URL": "https://executor.sh/org_YOUR_EXECUTOR_ORG/mcp"
+    }
+  }
+}

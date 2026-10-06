@@ -1,0 +1,65 @@
+{
+  "name": "capabilities",
+  "description": "Fluffles capability registry: what the harness can do, which tool answers, and how healthy it is.",
+  "required": true,
+  "tools": [
+    {
+      "name": "capabilities.summary",
+      "description": "Concise operational summary of the capability registry.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/capabilities", "summary", "--json"]
+    },
+    {
+      "name": "capabilities.list",
+      "description": "One line per capability with its tool and health.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/capabilities", "list", "--json"]
+    },
+    {
+      "name": "capabilities.show",
+      "description": "Show one capability by id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "capability id" }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/capabilities", "show", "{id}", "--json"]
+    },
+    {
+      "name": "capabilities.check",
+      "description": "Run and persist one tool health probe.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "tool name" }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/capabilities", "check", "{id}", "--json"],
+      "timeoutMs": 300000
+    },
+    {
+      "name": "capabilities.health",
+      "description": "Validate that the registry can be generated and written.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/capabilities", "health", "--json"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/capabilities", "health", "--json"]
+}

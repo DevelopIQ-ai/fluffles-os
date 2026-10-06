@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "comment": "The closed charter of executable surfaces that are not callable tools. Callable tools live in tools/mcp/manifests; everything executable that is not a manifest wrapper must be listed here as a harness organ or plumbing. commandRoots chart whole directories: every executable file directly inside one is harness plumbing by definition, so those entries are derived rather than retyped. The classification tests fail when a surface is in neither place.",
+  "tools": [
+    "agent-browser",
+    "amalgm",
+    "automations",
+    "automations-relay",
+    "browser-control",
+    "codex",
+    "fluffles-site",
+    "imsg-mcp",
+    "mcp",
+    "slack-send",
+    "webhooks"
+  ],
+  "commands": [
+    "bin/agent-browser",
+    "bin/amalgm",
+    "bin/automations",
+    "bin/automations-relay",
+    "bin/breadcrumb-service",
+    "bin/codex",
+    "bin/deploy-fluffles-site",
+    "bin/deploy-main",
+    "bin/email-channel",
+    "bin/executor-daemon",
+    "bin/executor-mcp",
+    "bin/executor-register",
+    "bin/github-gh",
+    "bin/github-ssh",
+    "bin/imsg",
+    "bin/mcp-serve",
+    "bin/phone-channel",
+    "bin/slack-send",
+    "bin/webhooks",
+    "subagents/bin/run-subagent"
+  ],
+  "commandRoots": [
+    "deploy/scripts",
+    "projects/fluffles-site/scripts",
+    "hooks/codex/bin"
+  ]
+}

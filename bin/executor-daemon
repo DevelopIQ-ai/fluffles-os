@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+# The executor cli resolves node through the environment, and a caller without
+# the harness node on PATH would fail before the daemon starts.
+PATH="${home}/homebrew/bin:${PATH:-/usr/bin:/bin}"
+export PATH
+
+# One source of truth for the port: the rendered executor service from the
+# deploy host config. The launchd service also sets EXECUTOR_PORT in its
+# environment, which takes precedence and must agree by construction.
+if [ -z "${EXECUTOR_PORT:-}" ]; then
+  EXECUTOR_PORT="$("${home}/homebrew/bin/node" -e '
+    import(process.argv[1]).then(({ hostServices, resolveHost }) => {
+      const host = resolveHost({ name: process.env.FLUFFLES_HOST ?? "", home: process.argv[2] });
+      const service = hostServices(host).find((candidate) => candidate.name === "executor");
+      if (!service) throw new Error("host does not run executor");
+      process.stdout.write(service.env.EXECUTOR_PORT);
+    }).catch((error) => { console.error(String(error)); process.exit(1); });
+  ' "${home}/deploy/lib/host.mjs" "${home}")"
+  export EXECUTOR_PORT
+fi
+
+exec "${home}/deploy/executor/node_modules/.bin/executor" daemon run \
+  --foreground \
+  --hostname 127.0.0.1 \
+  --port "${EXECUTOR_PORT}"

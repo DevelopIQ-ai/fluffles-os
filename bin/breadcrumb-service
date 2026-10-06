@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+service="${1:-}"
+if [ -z "$service" ]; then
+  echo "usage: breadcrumb-service <service-name> -- <command> [args...]" >&2
+  exit 64
+fi
+shift
+if [ "${1:-}" != "--" ]; then
+  echo "usage: breadcrumb-service <service-name> -- <command> [args...]" >&2
+  exit 64
+fi
+shift
+
+(
+  "${home}/bin/breadcrumb" emit \
+    --scope fluffles \
+    --component service \
+    --kind service.start \
+    --subject "$service" \
+    --result start \
+    --summary "$service started by launchd" \
+    --source launchd >/dev/null
+) 2>>${home}/state/breadcrumbs/service-errors.log || true
+
+exec "$@"

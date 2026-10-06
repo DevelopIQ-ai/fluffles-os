@@ -1,0 +1,49 @@
+{
+  "name": "subagents",
+  "description": "Fluffles subagents: list, validate, and scaffold the specialized agents the harness can run.",
+  "tools": [
+    {
+      "name": "subagents.list",
+      "description": "List every subagent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/create-subagent", "list"]
+    },
+    {
+      "name": "subagents.validate",
+      "description": "Validate one subagent's structure, or all of them when no name is given.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "subagent name" }
+        },
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/create-subagent", "validate", "{name?}"]
+    },
+    {
+      "name": "subagents.create",
+      "description": "Scaffold a new subagent with a mission and domain.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "subagent name" },
+          "mission": { "type": "string", "description": "one-line mission" },
+          "domain": { "type": "string", "description": "what the subagent owns" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/create-subagent",
+        "{name}",
+        "--mission {mission?}",
+        "--domain {domain?}"
+      ]
+    }
+  ],
+  "health": ["{{HOME}}/bin/create-subagent", "list"]
+}

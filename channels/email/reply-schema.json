@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "should_reply": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "body": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "should_reply",
+    "reason",
+    "subject",
+    "body"
+  ]
+}

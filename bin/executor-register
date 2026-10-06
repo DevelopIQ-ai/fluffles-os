@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+cd "${home}"
+exec "${home}/homebrew/bin/node" --import tsx "${home}/packages/mcp/bin/register.ts" "$@"

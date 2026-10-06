@@ -1,0 +1,34 @@
+{
+  "name": "vercel",
+  "description": "Vercel CLI. Credentials are injected host-side from Infisical.",
+  "secrets": {
+    "path": "/services/vercel"
+  },
+  "tools": [
+    {
+      "name": "vercel.run",
+      "description": "Vercel operations: deployments, projects, domains. Pass the full vercel argument list. Arguments are passed as argv exactly as given; nothing goes through a shell.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the vercel arguments, one argv entry per element"
+          }
+        },
+        "required": [
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/vercel",
+        "{args...}"
+      ],
+      "timeoutMs": 300000
+    }
+  ]
+}

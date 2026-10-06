@@ -1,0 +1,26 @@
+{
+  "notes": "Editable Fluffles context-pack limits. maxContextTokens is measured by ConversationRuntime's configured tokenizer or, without one, conservative UTF-8 byte units. Live Mac mini copy: /Users/ai/config/context-limits.json. Environment variables still override these values.",
+  "channels": {
+    "slack": {
+      "recentMessagesLimit": 20,
+      "maxContextChars": 12000,
+      "maxContextTokens": 12000,
+      "summaryMaxChars": 2000,
+      "openLoopsMaxChars": 1000
+    },
+    "email": {
+      "recentMessagesLimit": 20,
+      "maxContextChars": 12000,
+      "maxContextTokens": 12000,
+      "summaryMaxChars": 2000,
+      "openLoopsMaxChars": 1000
+    },
+    "phone": {
+      "recentMessagesLimit": 20,
+      "maxContextChars": 8000,
+      "maxContextTokens": 8000,
+      "summaryMaxChars": 1500,
+      "openLoopsMaxChars": 800
+    }
+  }
+}

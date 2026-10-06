@@ -1,0 +1,43 @@
+{
+  "id": "deploy-main",
+  "name": "Deploy Main",
+  "description": "Disabled legacy trigger. The Mac mini launchd poller owns deployments from canonical origin/main.",
+  "enabled": false,
+  "triggers": [
+    {
+      "kind": "schedule",
+      "cron": "* * * * *",
+      "tz": "America/Los_Angeles"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "deploy-main",
+      "argv": [
+        "{{ROOT}}/bin/breadcrumb",
+        "run",
+        "--scope",
+        "fluffles",
+        "--component",
+        "deploy",
+        "--kind",
+        "automation.run",
+        "--subject",
+        "deploy-main",
+        "--source",
+        "automations",
+        "--",
+        "/bin/sh",
+        "-lc",
+        "{{ROOT}}/bin/deploy-main"
+      ],
+      "cwd": "{{ROOT}}/projects/source-code",
+      "timeoutMs": 1200000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 0
+  }
+}

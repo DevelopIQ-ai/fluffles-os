@@ -1,0 +1,284 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use File::Basename qw(basename);
+use File::Copy qw(copy);
+use File::Path qw(remove_tree);
+use File::Temp qw(tempdir);
+use Fcntl qw(:DEFAULT);
+use FindBin qw($RealBin);
+
+# Creates private, invocation-owned plaintext state and reclaims state left by
+# an interrupted prior owner.  The explicit owner marker prevents a concurrent
+# invocation from deleting credentials still used by a live provider process.
+
+my ($mode, $prefix, $owner_pid) = @ARGV;
+my %allowed = map { $_ => 1 } qw(
+  amalgm-auth codex-auth gcloud-auth github-ssh gws-auth
+  infisical-runtime auth-push
+);
+exit 64 unless defined $mode;
+
+my $root = $ENV{TMPDIR} || '/tmp';
+my @root_stat = lstat($root);
+exit 78 unless @root_stat && -d _ && !-l _;
+
+sub process_identity {
+  my ($pid) = @_;
+  return unless defined $pid && $pid =~ /^\d+$/;
+  open my $identity, '-|', "$RealBin/auth-process-identity", $pid or return;
+  my $value = <$identity> // '';
+  close $identity or return;
+  chomp $value;
+  return $value if $value =~ /^[a-f0-9]{64}$/;
+  return;
+}
+
+sub marker_value {
+  my ($kind, $pid) = @_;
+  my $identity = process_identity($pid) // return;
+  return "$kind:$pid:$identity\n";
+}
+
+sub parse_owner {
+  my ($owner) = @_;
+  return unless $owner =~ /^(pid|pgid):(\d+)(?::([a-f0-9]{64}))?\n\z/;
+  return ($1, $2, $3);
+}
+
+sub owner_line_is_live {
+  my ($owner) = @_;
+  my ($kind, $pid, $identity) = parse_owner($owner);
+  return 1 unless defined $kind;
+  my $target = $kind eq 'pgid' ? -$pid : $pid;
+  my $alive = kill 0, $target;
+  return 0 unless $alive || $!{EPERM};
+  return 1 unless defined $identity;
+  my $current = process_identity($pid);
+  # A group leader can exit while descendants retain the group. In that case
+  # the still-existing group cannot have been reused and remains the owner.
+  return 1 if $kind eq 'pgid' && !defined $current;
+  return defined $current && $current eq $identity;
+}
+
+sub owned_private_directory {
+  my ($path) = @_;
+  my @stat = lstat($path);
+  return 0 unless @stat && -d _ && !-l _;
+  return 0 unless $stat[4] == $<;
+  return ($stat[2] & 0777) == 0700;
+}
+
+sub owner_is_live {
+  my ($path) = @_;
+  my $owner = "$path/.infisical-owner";
+  my @stat = lstat($owner);
+  # A concurrent creator exposes the directory before its marker is written.
+  # Treat any incomplete or malformed marker as live rather than risk deleting
+  # a just-created credential workspace. Only a valid dead owner is reclaimable.
+  return 1 unless @stat && -f _ && !-l _ && $stat[4] == $< && ($stat[2] & 0777) == 0600;
+  open my $fh, '<', $owner or return 1;
+  my $owner_line = <$fh> // '';
+  close $fh;
+  return owner_line_is_live($owner_line);
+}
+
+sub wait_for_process_group {
+  my ($pgid) = @_;
+  # `auth-run-child` creates its own group immediately before exec. Its parent
+  # can observe the child PID first, though, so never publish a pgid owner
+  # marker until that process group is actually live. Otherwise a concurrent
+  # recovery could mistake the short setup window for stale state.
+  for (1 .. 100) {
+    return 1 if kill(0, -$pgid);
+    select undef, undef, undef, 0.02;
+  }
+  return 0;
+}
+
+sub valid_persistent_directory {
+  my ($path) = @_;
+  my @stat = lstat($path);
+  return 0 unless @stat && -d _ && !-l _ && $stat[4] == $<;
+  return 1;
+}
+
+sub persistent_paths {
+  my ($directory) = @_;
+  return ("$directory/auth.json", "$directory/.infisical-auth.json-owner");
+}
+
+sub read_persistent_owner {
+  my ($marker) = @_;
+  my @stat = lstat($marker);
+  return 'none' unless @stat;
+  return 'invalid' unless -f _ && !-l _ && $stat[4] == $< && ($stat[2] & 0777) == 0600;
+  open my $fh, '<', $marker or return 'invalid';
+  my $owner = <$fh> // '';
+  close $fh;
+  return 'invalid' unless parse_owner($owner);
+  return owner_line_is_live($owner) ? 'live' : "dead:$owner";
+}
+
+sub persistent_owner_belongs_to {
+  my ($marker, $pid, $pgid) = @_;
+  open my $fh, '<', $marker or return 0;
+  my $owner = <$fh> // '';
+  close $fh;
+  my ($kind, $id) = parse_owner($owner);
+  return 0 unless defined $kind;
+  return $kind eq 'pid' ? $id == $pid : defined $pgid && $pgid ne '' && $id == $pgid;
+}
+
+sub recover_persistent_file {
+  my ($directory) = @_;
+  exit 78 unless valid_persistent_directory($directory);
+  my ($target, $marker) = persistent_paths($directory);
+  my $owner_state = read_persistent_owner($marker);
+  exit 78 if $owner_state eq 'invalid';
+  exit 75 if $owner_state eq 'live';
+  if (-e $target || -l $target) {
+    my @target_stat = lstat($target);
+    exit 78 unless @target_stat && -f _ && !-l _ && $target_stat[4] == $< && ($target_stat[2] & 0777) == 0600;
+    unlink $target or exit 70;
+  }
+  unlink $marker if $owner_state ne 'none';
+  return ($target, $marker);
+}
+
+if ($mode eq 'materialize-persistent') {
+  my ($directory, $source, $pid) = ($prefix, $owner_pid, $ARGV[3]);
+  exit 64 unless defined $directory && defined $source && defined $pid && $pid =~ /^\d+$/;
+  my @source_stat = lstat($source);
+  exit 78 unless @source_stat && -f _ && !-l _ && $source_stat[4] == $< && ($source_stat[2] & 0777) == 0600;
+  my ($target, $marker) = recover_persistent_file($directory);
+  my $staged_marker = "$marker.pending.$$";
+  my $staged_target = "$target.pending.$$";
+  my $owner_value = marker_value('pid', $pid) // exit 75;
+  sysopen my $marker_fh, $staged_marker, O_WRONLY | O_CREAT | O_EXCL, 0600 or exit 70;
+  print {$marker_fh} $owner_value or exit 70;
+  close $marker_fh or exit 70;
+  chmod 0600, $staged_marker or exit 70;
+  copy($source, $staged_target) or exit 70;
+  chmod 0600, $staged_target or exit 70;
+  rename $staged_marker, $marker or exit 70;
+  rename $staged_target, $target or exit 70;
+  print "$target\n";
+  exit 0;
+}
+
+if ($mode eq 'set-persistent-owner-group') {
+  my ($directory, $pgid) = ($prefix, $owner_pid);
+  exit 64 unless defined $directory && defined $pgid && $pgid =~ /^\d+$/ && valid_persistent_directory($directory);
+  exit 75 unless wait_for_process_group($pgid);
+  my (undef, $marker) = persistent_paths($directory);
+  my $owner_state = read_persistent_owner($marker);
+  exit 78 if $owner_state eq 'none' || $owner_state eq 'invalid';
+  my $owner_value = marker_value('pgid', $pgid) // exit 75;
+  my $pending = "$marker.pending.$$";
+  sysopen my $fh, $pending, O_WRONLY | O_CREAT | O_EXCL, 0600 or exit 70;
+  print {$fh} $owner_value or exit 70;
+  close $fh or exit 70;
+  chmod 0600, $pending or exit 70;
+  rename $pending, $marker or exit 70;
+  exit 0;
+}
+
+if ($mode eq 'remove-persistent') {
+  my ($directory, $pid, $pgid) = ($prefix, $owner_pid, $ARGV[3] // '');
+  exit 64 unless defined $directory && defined $pid && $pid =~ /^\d+$/ && $pgid =~ /^\d*$/ && valid_persistent_directory($directory);
+  my ($target, $marker) = persistent_paths($directory);
+  my $owner_state = read_persistent_owner($marker);
+  exit 0 if $owner_state eq 'none';
+  exit 78 if $owner_state eq 'invalid';
+  if ($owner_state eq 'live') {
+    exit 75 unless persistent_owner_belongs_to($marker, $pid, '');
+  }
+  exit 75 unless persistent_owner_belongs_to($marker, $pid, $pgid);
+  if (-e $target || -l $target) {
+    my @target_stat = lstat($target);
+    exit 78 unless @target_stat && -f _ && !-l _ && $target_stat[4] == $< && ($target_stat[2] & 0777) == 0600;
+    unlink $target or exit 70;
+  }
+  unlink $marker or exit 70;
+  exit 0;
+}
+
+sub valid_state_path {
+  my ($path) = @_;
+  return 0 unless index($path, "$root/") == 0;
+  my $name = basename($path);
+  return 0 unless grep { $name =~ /^\Q$_\E\.[A-Za-z0-9_-]{6,}\z/ } keys %allowed;
+  return owned_private_directory($path);
+}
+
+if ($mode eq 'set-owner-group') {
+  my ($state, $pgid) = ($prefix, $owner_pid);
+  exit 64 unless defined $state && defined $pgid && $pgid =~ /^\d+$/ && valid_state_path($state);
+  my $group_ready = wait_for_process_group($pgid);
+  # A very short-lived provider can exit after its PID is observed but before
+  # the owner marker is promoted to a process group. There is then no live
+  # process that needs group ownership, so retain the parent marker and allow
+  # its synchronous caller to reap and clean the completed invocation.
+  exit 0 if $group_ready == 0;
+  exit 75 if $group_ready < 0;
+  my $marker = "$state/.infisical-owner";
+  my @stat = lstat($marker);
+  exit 78 unless @stat && -f _ && !-l _ && $stat[4] == $< && ($stat[2] & 0777) == 0600;
+  my $owner_value = marker_value('pgid', $pgid);
+  if (!defined $owner_value) {
+    # The group can disappear after the readiness probe and before identity
+    # lookup. It no longer needs group ownership, so retain the parent marker
+    # for the synchronous caller to reap and clean. If it is still live, fail
+    # closed because its identity could not be validated.
+    exit 0 unless kill(0, -$pgid) || $!{EPERM};
+    exit 75;
+  }
+  my $pending = "$state/.infisical-owner.pending.$$";
+  sysopen my $fh, $pending, O_WRONLY | O_CREAT | O_EXCL, 0600 or exit 70;
+  print {$fh} $owner_value or exit 70;
+  close $fh or exit 70;
+  chmod 0600, $pending or exit 70;
+  rename $pending, $marker or exit 70;
+  exit 0;
+}
+
+exit 64 unless $mode eq 'create' && defined $prefix && $allowed{$prefix}
+  && defined $owner_pid && $owner_pid =~ /^\d+$/;
+
+opendir my $directory, $root or exit 70;
+while (my $entry = readdir $directory) {
+  if ($entry =~ /^\.\Q$prefix\E\.pending\.(\d+)\.[A-Za-z0-9_-]{6,}\z/) {
+    my $candidate = "$root/$entry";
+    next unless owned_private_directory($candidate);
+    next if kill 0, $1;
+    remove_tree($candidate, { safe => 1, error => \my $errors });
+    exit 70 if @$errors;
+    next;
+  }
+  # File::Temp uses an underscore in generated suffixes on macOS. Keep the
+  # recognizer aligned with its output so a SIGKILL-recovery pass can reclaim
+  # the private directories this helper itself created.
+  next unless $entry =~ /^\Q$prefix\E\.[A-Za-z0-9_-]{6,}\z/;
+  my $candidate = "$root/$entry";
+  next unless owned_private_directory($candidate);
+  next if owner_is_live($candidate);
+  remove_tree($candidate, { safe => 1, error => \my $errors });
+  exit 70 if @$errors;
+}
+closedir $directory;
+
+my $staged_state = tempdir(".$prefix.pending.$owner_pid.XXXXXX", DIR => $root, CLEANUP => 0);
+chmod 0700, $staged_state or exit 70;
+my $marker = "$staged_state/.infisical-owner";
+my $owner_value = marker_value('pid', $owner_pid) // exit 75;
+sysopen my $marker_fh, $marker, O_WRONLY | O_CREAT | O_EXCL, 0600 or exit 70;
+print {$marker_fh} $owner_value or exit 70;
+close $marker_fh or exit 70;
+chmod 0600, $marker or exit 70;
+my ($suffix) = basename($staged_state) =~ /\.([A-Za-z0-9_-]{6,})\z/;
+exit 70 unless defined $suffix;
+my $state = "$root/$prefix.$suffix";
+exit 70 if -e $state || -l $state;
+rename $staged_state, $state or exit 70;
+print "$state\n";

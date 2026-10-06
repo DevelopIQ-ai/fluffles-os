@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+state_dir="${home}/state/tools/gh/config"
+mkdir -p "$state_dir"
+export GH_CONFIG_DIR="$state_dir"
+exec "${home}/packages/auth/bin/with-tool-secrets" gh -- "${home}/bin/github-gh" "$@"

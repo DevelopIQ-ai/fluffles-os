@@ -1,0 +1,19 @@
+{
+  "name": "fluffles-harness-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Strict TypeScript checks for standalone Fluffles harness scripts.",
+  "scripts": {
+    "build": "tsc -p tsconfig.scripts.json --noEmit",
+    "check": "npm run build",
+    "test": "npm run build && node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

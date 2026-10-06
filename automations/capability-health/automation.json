@@ -1,0 +1,46 @@
+{
+  "id": "capability-health",
+  "name": "capability tool health",
+  "description": "Runs the manifest health probes every five minutes and records repair work.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "schedule",
+      "cron": "*/5 * * * *",
+      "tz": "America/Los_Angeles"
+    },
+    {
+      "kind": "manual"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "capability-tool-health",
+      "argv": [
+        "{{ROOT}}/bin/breadcrumb",
+        "run",
+        "--scope",
+        "fluffles",
+        "--component",
+        "capabilities",
+        "--kind",
+        "automation.run",
+        "--subject",
+        "capability-health",
+        "--source",
+        "automations",
+        "--",
+        "/bin/sh",
+        "-lc",
+        "{{ROOT}}/bin/capabilities register --json"
+      ],
+      "cwd": "{{ROOT}}",
+      "timeoutMs": 180000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 1
+  }
+}

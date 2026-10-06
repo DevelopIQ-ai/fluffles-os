@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+export IMSG_STATE_DIR="${IMSG_STATE_DIR:-${home}/state/tools/imsg-mcp}"
+export VITE_IMSG_DB_PATH="${VITE_IMSG_DB_PATH:-${home}/Library/Messages/chat.db}"
+export VITE_SLUGS_DB_PATH="${VITE_SLUGS_DB_PATH:-$IMSG_STATE_DIR/slugs.db}"
+
+exec "${home}/tools/payloads/npm/imsg-mcp/node_modules/.bin/imsg" "$@"

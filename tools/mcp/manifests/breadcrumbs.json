@@ -1,0 +1,73 @@
+{
+  "name": "breadcrumbs",
+  "description": "Fluffles observability trail: structured breadcrumbs every harness action leaves behind.",
+  "required": true,
+  "tools": [
+    {
+      "name": "breadcrumbs.tail",
+      "description": "Read recent breadcrumbs, optionally filtered by scope, component, or time window.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": { "type": "string", "description": "filter by scope" },
+          "component": { "type": "string", "description": "filter by component" },
+          "from": { "type": "string", "description": "ISO timestamp lower bound" },
+          "until": { "type": "string", "description": "ISO timestamp upper bound" },
+          "limit": { "type": "number", "description": "maximum entries" }
+        },
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/breadcrumb",
+        "tail",
+        "--scope {scope?}",
+        "--component {component?}",
+        "--from {from?}",
+        "--until {until?}",
+        "--limit {limit?}",
+        "--json"
+      ]
+    },
+    {
+      "name": "breadcrumbs.emit",
+      "description": "Emit one breadcrumb.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scope": { "type": "string", "description": "scope" },
+          "component": { "type": "string", "description": "component" },
+          "kind": { "type": "string", "description": "kind" },
+          "subject": { "type": "string", "description": "subject" },
+          "result": { "type": "string", "description": "result" },
+          "summary": { "type": "string", "description": "summary" }
+        },
+        "required": ["scope", "component", "kind"],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/breadcrumb",
+        "emit",
+        "--scope",
+        "{scope}",
+        "--component",
+        "{component}",
+        "--kind",
+        "{kind}",
+        "--subject {subject?}",
+        "--result {result?}",
+        "--summary {summary?}"
+      ]
+    },
+    {
+      "name": "breadcrumbs.health",
+      "description": "Report breadcrumb store health.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/breadcrumb", "health"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/breadcrumb", "health"]
+}

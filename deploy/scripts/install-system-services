@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="install"
+case "${1:-}" in
+  "") ;;
+  --health) mode="health" ;;
+  --check) mode="check" ;;
+  --changed-only) mode="changed-only" ;;
+  --stage-only) mode="stage-only" ;;
+  *)
+    echo "usage: install-system-services [--health|--check|--changed-only|--stage-only]" >&2
+    exit 64
+    ;;
+esac
+
+root="${INSTALL_SYSTEM_SERVICES_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+# Overridable so the deploy that drives this installer can be exercised end to
+# end against a throwaway tree. Only an install into the real system location
+# is privileged or owns anything under the harness home.
+destination="${INSTALL_SYSTEM_SERVICES_DESTINATION:-}"
+plistbuddy="${INSTALL_SYSTEM_SERVICES_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
+node="${INSTALL_SYSTEM_SERVICES_NODE:-node}"
+# Which harness is being installed. The manifests, the account they run as and
+# the state directories they need all come from the host file rather than from
+# constants, so the dev harness installs the same way production does.
+host_name="${INSTALL_SYSTEM_SERVICES_HOST:-${FLUFFLES_HOST:-}}"
+# Expanded as ${host_args[@]+...} everywhere below: macOS ships bash 3.2, where
+# an empty array under set -u is an unbound variable.
+host_args=()
+if [[ -n "$host_name" ]]; then
+  host_args=(--host "$host_name")
+fi
+service_home="${INSTALL_SYSTEM_SERVICES_HOME:-$(HOME="${INSTALL_SYSTEM_SERVICES_HOME:-${HOME:-}}" "$node" "${root}/deploy/bin/host-config.mjs" ${host_args[@]+"${host_args[@]}"} --field home)}"
+service_user="$(HOME="$service_home" "$node" "${root}/deploy/bin/host-config.mjs" ${host_args[@]+"${host_args[@]}"} --field user)"
+service_group="$(HOME="$service_home" "$node" "${root}/deploy/bin/host-config.mjs" ${host_args[@]+"${host_args[@]}"} --field group)"
+# A host's services are either root-owned system daemons or the service user's
+# own agents. Only the former is privileged, and only the former is loaded into
+# the system domain, so the dev harness installs without sudo and cannot
+# disturb a production daemon of the same shape.
+service_domain="$(HOME="$service_home" "$node" "${root}/deploy/bin/host-config.mjs" ${host_args[@]+"${host_args[@]}"} --field domain)"
+if [[ -z "$destination" ]]; then
+  # Where the manifests belong is the host's answer, not this script's. A
+  # user-domain host installs its own agents; only a system-domain host writes
+  # into a root-owned directory.
+  destination="$(HOME="$service_home" "$node" "${root}/deploy/bin/host-config.mjs" ${host_args[@]+"${host_args[@]}"} --field systemDaemonRoot)"
+fi
+# A user-domain host installs its own agents, so its manifests must land inside
+# its own home. Refusing here is what stops a mistyped destination, or a sudo
+# nobody meant to type, from writing the dev harness into production's daemon
+# directory.
+if [[ "$service_domain" != "system" && "$destination" != "${service_home}/"* ]]; then
+  echo "host ${host_name:-(default)} runs ${service_domain}-domain services, which belong under ${service_home}, not in ${destination}" >&2
+  exit 78
+fi
+# Two harnesses share this machine, and root can install either one's services.
+# An installer run from one account for the other account's host is a mistake
+# every time, and it is how a dev tree came to reinstall production's daemons.
+invoking_user="${SUDO_USER:-$(id -un)}"
+if [[ "$invoking_user" != "root" && "$invoking_user" != "$service_user" ]]; then
+  echo "refusing to install ${service_user}'s services from ${invoking_user}'s account; run this as ${service_user}, or name this account's host" >&2
+  exit 78
+fi
+# launchd refuses a system-domain job whose manifest is not root-owned, wherever
+# that manifest lives, so a system-domain host installs as root even when it
+# keeps its manifests inside its own home.
+# Overridable so a throwaway tree, whose launchd is a stand-in that owns
+# nothing, can install a system-domain host's manifests without privilege.
+system_install=0
+if [[ "$service_domain" == "system" && "${INSTALL_SYSTEM_SERVICES_PRIVILEGED:-1}" != "0" ]]; then
+  system_install=1
+fi
+if [[ "$service_domain" == "system" ]]; then
+  launchd_domain="system"
+else
+  # A GUI login session has gui/<uid>; an account nobody is logged into as a
+  # human only has user/<uid>, and asking for the missing one fails every
+  # bootstrap.
+  service_uid="$(id -u "$service_user")"
+  if launchctl print "gui/${service_uid}" >/dev/null 2>&1; then
+    launchd_domain="gui/${service_uid}"
+  else
+    launchd_domain="user/${service_uid}"
+  fi
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# One rendering of the host's manifests, reused by every mode below.
+rendered="${tmp}/rendered"
+HOME="$service_home" "$node" "${root}/deploy/bin/render-services.mjs" ${host_args[@]+"${host_args[@]}"} --out "$rendered" >/dev/null
+files=()
+while IFS= read -r file; do
+  files+=("$file")
+done < <(find "$rendered" -name '*.plist' | sort)
+
+if [[ "$mode" == "health" ]]; then
+  for source_plist in "${files[@]}"; do
+    plutil -lint "$source_plist" >/dev/null
+  done
+  echo "system service manifests are valid"
+  exit 0
+fi
+
+stage_plist() {
+  local source_plist="$1"
+  local staged="$2"
+  plutil -lint "$source_plist" >/dev/null
+  cp "$source_plist" "$staged"
+  "$plistbuddy" -c 'Delete :UserName' "$staged" >/dev/null 2>&1 || true
+  "$plistbuddy" -c "Add :UserName string ${service_user}" "$staged"
+}
+
+if [[ "$mode" == "check" ]]; then
+  changed=0
+  for source_plist in "${files[@]}"; do
+    label="$("$plistbuddy" -c 'Print :Label' "$source_plist")"
+    target="${destination}/${label}.plist"
+    staged="${tmp}/${label}.plist"
+    stage_plist "$source_plist" "$staged"
+    if ! cmp -s "$staged" "$target"; then
+      echo "${label}: pending"
+      changed=1
+    fi
+  done
+  if [[ "$changed" == "1" ]]; then
+    exit 3
+  fi
+  echo "system daemon manifests are up to date"
+  exit 0
+fi
+
+if [[ "$system_install" == "1" && "$(id -u)" != "0" ]]; then
+  echo "install-system-services must run as root" >&2
+  exit 1
+fi
+
+make_state_directory() {
+  local directory="$1"
+  if [[ "$system_install" == "1" ]]; then
+    install -d -o "$service_user" -g "$service_group" -m 755 "$directory"
+  else
+    install -d -m 755 "$directory"
+  fi
+}
+
+# launchd does not create the parents of StandardOutPath, and a daemon whose
+# output cannot be redirected never starts. The log directories are read back
+# out of the manifests rather than listed here, because a hand-written list is
+# a list that a new service is left off of.
+state_directories=(
+  "${service_home}/state/deploy-main"
+  "${service_home}/state/automations"
+  "${service_home}/state/automations/logs"
+  "${service_home}/state/breadcrumbs"
+)
+for source_plist in "${files[@]}"; do
+  for key in StandardOutPath StandardErrorPath; do
+    log_path="$("$plistbuddy" -c "Print :${key}" "$source_plist" 2>/dev/null || true)"
+    if [[ -n "$log_path" ]]; then
+      state_directories+=("$(dirname "$log_path")")
+    fi
+  done
+done
+for directory in "${state_directories[@]}"; do
+  make_state_directory "$directory"
+done
+mkdir -p "$destination"
+
+for source_plist in "${files[@]}"; do
+  label="$("$plistbuddy" -c 'Print :Label' "$source_plist")"
+  target="${destination}/${label}.plist"
+  staged="${tmp}/${label}.plist"
+  stage_plist "$source_plist" "$staged"
+  if [[ "$mode" == "changed-only" || "$mode" == "stage-only" ]] && cmp -s "$staged" "$target"; then
+    echo "${label}: unchanged"
+    continue
+  fi
+  if [[ "$system_install" == "1" ]]; then
+    install -o root -g wheel -m 644 "$staged" "$target"
+  else
+    install -m 644 "$staged" "$target"
+  fi
+  if [[ "$mode" == "stage-only" ]]; then
+    # Deploys keep services booted out until the whole managed sync has
+    # converged; the deploy bootstraps them from the installed manifests
+    # afterwards.
+    echo "${label}: staged"
+    continue
+  fi
+  if [[ "$mode" == "changed-only" && "$label" == *".harness.deploy-main" ]]; then
+    # Never bootout the deploy poller from inside a deploy: the deploy run
+    # itself is this job. The updated manifest takes effect the next time
+    # the service is reloaded.
+    echo "${label}: staged for next reload"
+    continue
+  fi
+  launchctl bootout "${launchd_domain}/${label}" >/dev/null 2>&1 || true
+  loaded=0
+  bootstrap_error="${tmp}/${label}.bootstrap-error"
+  for _ in {1..10}; do
+    if launchctl bootstrap "$launchd_domain" "$target" 2>"$bootstrap_error"; then
+      loaded=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$loaded" != "1" ]]; then
+    cat "$bootstrap_error" >&2
+    echo "${label}: failed to install after retries" >&2
+    exit 1
+  fi
+  echo "${label}: installed"
+done

@@ -1,0 +1,6 @@
+#!/bin/zsh
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+exec "${home}/homebrew/opt/tailscale/bin/tailscale" --socket="${home}/state/tools/tailscale/tailscaled.socket" "$@"

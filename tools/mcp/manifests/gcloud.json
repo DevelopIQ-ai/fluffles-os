@@ -1,0 +1,49 @@
+{
+  "name": "gcloud",
+  "description": "Google Cloud CLI. Credentials are injected host-side from Infisical.",
+  "secrets": {
+    "path": "/services/gcloud"
+  },
+  "tools": [
+    {
+      "name": "gcloud.run",
+      "description": "Google Cloud operations. Pass the full gcloud argument list, e.g. \"run services list --format json\". Arguments are passed as argv exactly as given; nothing goes through a shell. Credential-printing subcommands are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the gcloud arguments, one argv entry per element"
+          }
+        },
+        "required": [
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/gcloud",
+        "{args...}"
+      ],
+      "timeoutMs": 300000,
+      "deny": [
+        [
+          "auth",
+          "print-access-token"
+        ],
+        [
+          "auth",
+          "print-identity-token"
+        ],
+        [
+          "auth",
+          "application-default",
+          "print-access-token"
+        ]
+      ]
+    }
+  ]
+}

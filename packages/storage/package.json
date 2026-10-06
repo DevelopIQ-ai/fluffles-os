@@ -1,0 +1,25 @@
+{
+  "name": "@fluffles/storage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Durable SQLite foundation: WAL+FULL contract, migration runner, single write chain, generic row parsing.",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

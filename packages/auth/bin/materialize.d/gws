@@ -1,0 +1,33 @@
+# shellcheck shell=sh
+
+spec_state_prefix="gws-auth"
+spec_component="gws"
+spec_require="GOOGLE_WORKSPACE_OAUTH_CREDENTIALS_JSON"
+spec_files="GOOGLE_WORKSPACE_OAUTH_CREDENTIALS_JSON:credentials.json"
+spec_push="/services/google-workspace:GOOGLE_WORKSPACE_OAUTH_CREDENTIALS_JSON:credentials.json"
+spec_exec="${home}/homebrew/bin/gws"
+
+spec_validate() {
+  if ! "$node_bin" - "${temporary_dir}/credentials.json" <<'NODE'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!value || typeof value !== "object" || Array.isArray(value)
+  || typeof value.client_id !== "string" || !value.client_id
+  || typeof value.client_secret !== "string" || !value.client_secret
+  || typeof value.refresh_token !== "string" || !value.refresh_token
+  || value.type !== "authorized_user") process.exit(1);
+NODE
+  then
+    echo "gws: injected OAuth credentials are invalid" >&2
+    exit 78
+  fi
+}
+
+spec_prepare() {
+  mkdir -p "${temporary_dir}/config" || exit 70
+  export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="${temporary_dir}/credentials.json"
+  export GOOGLE_WORKSPACE_CLI_CONFIG_DIR="${temporary_dir}/config"
+  export GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND="file"
+  export GOOGLE_WORKSPACE_CLI_LOG_FILE="${home}/state/tools/gws/logs"
+  mkdir -p "$GOOGLE_WORKSPACE_CLI_LOG_FILE" || exit 70
+}

@@ -1,0 +1,43 @@
+{
+  "service": "webhooks",
+  "version": 1,
+  "baseUrl": "http://127.0.0.1:8787",
+  "stateDir": "$HOME/state/webhooks",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/",
+      "description": "service status"
+    },
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "description": "compact health check"
+    },
+    {
+      "method": "GET",
+      "path": "/routes",
+      "description": "route inventory"
+    },
+    {
+      "method": "GET",
+      "path": "/events/latest",
+      "description": "latest stored event receipt"
+    },
+    {
+      "method": "POST",
+      "path": "/events/test",
+      "description": "local smoke event"
+    },
+    {
+      "method": "POST",
+      "path": "/events/generic",
+      "description": "generic machine event with optional shared secret"
+    },
+    {
+      "method": "POST",
+      "path": "/github/events",
+      "description": "GitHub webhook endpoint requiring x-hub-signature-256"
+    }
+  ]
+}

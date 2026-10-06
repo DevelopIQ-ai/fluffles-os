@@ -1,0 +1,72 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/breadcrumb-hook SessionStart",
+            "timeout": 1,
+            "statusMessage": "record breadcrumb"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/session-time",
+            "timeout": 1,
+            "statusMessage": "add session start time"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/memory-context",
+            "timeout": 10,
+            "statusMessage": "load memory context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/breadcrumb-hook UserPromptSubmit",
+            "timeout": 1,
+            "statusMessage": "record breadcrumb"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/breadcrumb-hook PostToolUse",
+            "timeout": 1,
+            "statusMessage": "record breadcrumb"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $HOME/hooks/codex/bin/breadcrumb-hook Stop",
+            "timeout": 1,
+            "statusMessage": "record breadcrumb"
+          }
+        ]
+      }
+    ]
+  }
+}

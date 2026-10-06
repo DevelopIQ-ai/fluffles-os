@@ -1,0 +1,272 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+bootstrap_file="${home}/auth/infisical/machine-identity.env"
+bootstrap_dir="${home}/auth/infisical"
+infisical_bin="${home}/homebrew/bin/infisical"
+# Which vault this harness reads is host state, not source: production and the
+# dev harness are separate Infisical projects, and a wrong default here would
+# let dev read production's secrets.
+project_file="${home}/auth/infisical/project-id"
+project_id=""
+environment="dev"
+retry_count=3
+auth_timeout_seconds=20
+infisical_exec="${home}/packages/auth/bin/infisical-exec"
+temp_state="${home}/packages/auth/bin/auth-temp-state"
+
+unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID
+unset INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
+unset INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN
+unset INFISICAL_TOKEN
+unset infisical_client_id infisical_client_secret infisical_access_token
+unset VERCEL_REFRESH_TOKEN GITHUB_DEPLOY_SSH_PRIVATE_KEY_FLUFFLES_SOURCE
+for managed_environment_name in $("$infisical_exec" managed-environment-names); do
+  unset "$managed_environment_name"
+done
+
+usage() {
+  echo "usage: infisical-run --path <approved-secret-path> -- <command> [args...]" >&2
+}
+
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
+file_owner() {
+  if stat -f '%u' "$1" >/dev/null 2>&1; then
+    stat -f '%u' "$1"
+  else
+    stat -c '%u' "$1"
+  fi
+}
+
+secret_path=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --path)
+      if [ "$#" -lt 2 ] || [ -n "$secret_path" ]; then
+        usage
+        exit 64
+      fi
+      secret_path="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ -z "$secret_path" ] || [ "$#" -eq 0 ] || ! "$infisical_exec" validate-path "$secret_path"; then
+  usage
+  exit 64
+fi
+
+if [ ! -d "$bootstrap_dir" ] || [ -L "$bootstrap_dir" ]; then
+  echo "invalid Infisical bootstrap directory: $bootstrap_dir" >&2
+  exit 78
+fi
+
+if [ "$(file_mode "$bootstrap_dir")" != "700" ] || [ "$(file_owner "$bootstrap_dir")" != "$(id -u)" ]; then
+  echo "Infisical bootstrap directory must be owned by the service user with mode 700: $bootstrap_dir" >&2
+  exit 78
+fi
+
+if [ ! -f "$bootstrap_file" ] || [ -L "$bootstrap_file" ] || [ ! -r "$bootstrap_file" ]; then
+  echo "missing Infisical machine identity bootstrap: $bootstrap_file" >&2
+  exit 78
+fi
+
+if [ "$(file_mode "$bootstrap_file")" != "600" ] || [ "$(file_owner "$bootstrap_file")" != "$(id -u)" ]; then
+  echo "Infisical machine identity bootstrap must be owned by the service user with mode 600: $bootstrap_file" >&2
+  exit 78
+fi
+
+if [ ! -x "$infisical_bin" ]; then
+  echo "Infisical CLI is unavailable: $infisical_bin" >&2
+  exit 69
+fi
+
+if ! awk '
+  { sub(/\r$/, "") }
+  /^[[:space:]]*($|#)/ { next }
+  /^INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=[A-Za-z0-9-]+$/ { client_id += 1; next }
+  /^INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=[A-Za-z0-9-]+$/ { client_secret += 1; next }
+  { invalid = 1 }
+  END { exit invalid || client_id != 1 || client_secret != 1 }
+' "$bootstrap_file"; then
+  echo "Infisical machine identity bootstrap must contain exactly one valid client ID and client secret" >&2
+  exit 78
+fi
+
+infisical_client_id="$(awk -F= '$1 == "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" { print substr($0, length($1) + 2) }' "$bootstrap_file")"
+infisical_client_secret="$(awk -F= '$1 == "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET" { print substr($0, length($1) + 2) }' "$bootstrap_file")"
+
+if [ ! -f "$project_file" ] || [ -L "$project_file" ] || [ ! -r "$project_file" ]; then
+  echo "missing Infisical project id: $project_file" >&2
+  exit 78
+fi
+project_id="$(tr -d ' \t\r\n' < "$project_file")"
+case "$project_id" in
+  "" | *[!0-9a-fA-F-]*)
+    echo "Infisical project id must be a project uuid: $project_file" >&2
+    exit 78
+    ;;
+esac
+
+umask 077
+runtime_dir="$("$temp_state" create infisical-runtime "$$")" || exit 70
+token_file="${runtime_dir}/token"
+baseline_file="${runtime_dir}/environment"
+"$infisical_exec" capture-baseline "$secret_path" "$baseline_file" || exit $?
+infisical_login_pid=""
+
+cleanup() {
+  if [ -n "$infisical_login_pid" ]; then
+    kill -TERM "$infisical_login_pid" >/dev/null 2>&1 || true
+    wait "$infisical_login_pid" >/dev/null 2>&1 || true
+    infisical_login_pid=""
+  fi
+  if [ -n "$runtime_dir" ]; then
+    rm -rf "$runtime_dir"
+  fi
+  unset infisical_client_id infisical_client_secret infisical_access_token
+}
+
+exit_for_signal() {
+  signal_status="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$signal_status"
+}
+
+trap cleanup EXIT
+trap 'exit_for_signal 129' HUP
+trap 'exit_for_signal 130' INT
+trap 'exit_for_signal 143' TERM
+
+login_once() {
+  : >"$token_file" || return 70
+  # The timeout process owns and reaps the login process group. Its polling
+  # state machine bounds timeout and interruption cleanup without leaving a
+  # detached authentication child behind.
+  INFISICAL_DISABLE_UPDATE_CHECK=true \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$infisical_client_id" \
+    INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$infisical_client_secret" \
+    /usr/bin/perl -e '
+      use POSIX qw(WNOHANG);
+      use Time::HiRes qw(time usleep);
+      my ($timeout, @command) = @ARGV;
+      my $pid = 0;
+      my $interrupted = 0;
+      local $SIG{HUP} = sub { $interrupted ||= 129 };
+      local $SIG{INT} = sub { $interrupted ||= 130 };
+      local $SIG{TERM} = sub { $interrupted ||= 143 };
+      $pid = fork();
+      die "fork failed: $!\n" unless defined $pid;
+      if ($pid == 0) {
+        $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
+        setpgrp(0, 0) or exit 70;
+        exec @command or exit 127;
+      }
+      setpgrp($pid, $pid);
+      my $timed_out = 0;
+      my $term_sent = 0;
+      my $kill_sent = 0;
+      my $deadline = time() + $timeout;
+      my $cleanup_deadline = 0;
+      my $status = -1;
+      while (1) {
+        my $waited = waitpid($pid, WNOHANG);
+        if ($waited == $pid) {
+          $status = $?;
+          last;
+        }
+        last if $waited == -1;
+        my $now = time();
+        $timed_out = 1 if !$interrupted && !$term_sent && $now >= $deadline;
+        if (($interrupted || $timed_out) && !$term_sent) {
+          kill("TERM", -$pid) || kill("TERM", $pid);
+          $term_sent = 1;
+          $cleanup_deadline = $now + 1;
+        } elsif ($term_sent && !$kill_sent && $now >= $cleanup_deadline) {
+          kill("KILL", -$pid) || kill("KILL", $pid);
+          $kill_sent = 1;
+          $cleanup_deadline = $now + 5;
+        } elsif ($kill_sent && $now >= $cleanup_deadline) {
+          last;
+        }
+        usleep(50_000);
+      }
+      exit $interrupted if $interrupted;
+      exit 124 if $timed_out;
+      exit 127 if $status == -1;
+      exit($status >> 8) if ($status & 127) == 0;
+      exit(128 + ($status & 127));
+    ' "$auth_timeout_seconds" "$infisical_exec" exec-infisical login "$secret_path" "$baseline_file" -- \
+      "$infisical_bin" login \
+      --method=universal-auth --silent --telemetry=false --plain >"$token_file" &
+  infisical_login_pid=$!
+
+  if wait "$infisical_login_pid"; then
+    login_status=0
+  else
+    login_status=$?
+  fi
+  infisical_login_pid=""
+  return "$login_status"
+}
+
+attempt=1
+while :; do
+  if login_once; then
+    break
+  fi
+  if [ "$attempt" -ge "$retry_count" ]; then
+    echo "Infisical machine identity authentication failed after ${retry_count} attempts" >&2
+    exit 77
+  fi
+  sleep "$attempt"
+  attempt=$((attempt + 1))
+done
+
+infisical_access_token="$(tr -d '\r\n' <"$token_file")"
+case "$infisical_access_token" in
+  ''|*[!A-Za-z0-9._-]*)
+    echo "Infisical machine identity authentication returned an invalid token" >&2
+    exit 77
+    ;;
+esac
+if [ "$(wc -l <"$token_file" | tr -d ' ')" -gt 1 ]; then
+  echo "Infisical machine identity authentication returned an invalid token" >&2
+  exit 77
+fi
+
+rm -f "$token_file"
+token_file=""
+unset infisical_client_id infisical_client_secret
+trap - EXIT HUP INT TERM
+
+INFISICAL_TOKEN= \
+INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN="$infisical_access_token" \
+  exec "$infisical_exec" exec-infisical access "$secret_path" "$baseline_file" -- \
+  "$infisical_bin" run \
+  --silent \
+  --telemetry=false \
+  --projectId="$project_id" \
+  --env="$environment" \
+  --path="$secret_path" \
+  -- "$infisical_exec" exec "$secret_path" "$baseline_file" -- "$@"

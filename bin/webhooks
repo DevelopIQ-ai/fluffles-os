@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+cd "${home}/channels/webhooks"
+case "${1:-}" in
+  start|restart)
+    exec "${home}/packages/auth/bin/infisical-run" --path /services/webhooks -- "${home}/homebrew/bin/node" --import tsx "${home}/channels/webhooks/bin/webhooks.ts" "$@"
+    ;;
+  set-secret)
+    exec "${home}/packages/auth/bin/infisical-run" --path /services/webhooks -- "${home}/homebrew/bin/node" --import tsx "${home}/channels/webhooks/bin/webhooks.ts" "$@"
+    ;;
+  *)
+    exec "${home}/homebrew/bin/node" --import tsx "${home}/channels/webhooks/bin/webhooks.ts" "$@"
+    ;;
+esac

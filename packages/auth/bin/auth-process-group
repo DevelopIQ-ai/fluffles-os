@@ -1,0 +1,77 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use JSON::PP qw(encode_json);
+use Time::HiRes qw(time usleep);
+
+sub fail_usage {
+  print STDERR "usage: auth-process-group drain <pgid> [term-timeout-ms] [kill-timeout-ms]\n";
+  exit 64;
+}
+
+my ($command, $pgid, $term_timeout_ms, $kill_timeout_ms) = @ARGV;
+fail_usage() unless defined $command && $command eq 'drain';
+fail_usage() unless defined $pgid && $pgid =~ /^[1-9][0-9]*$/;
+$term_timeout_ms = 3000 unless defined $term_timeout_ms;
+$kill_timeout_ms = 5000 unless defined $kill_timeout_ms;
+fail_usage() unless $term_timeout_ms =~ /^[1-9][0-9]*$/ && $kill_timeout_ms =~ /^[1-9][0-9]*$/;
+$pgid = int($pgid);
+fail_usage() if $pgid == getpgrp();
+
+sub group_exists {
+  my $count = kill 0, -$pgid;
+  return 1 if $count > 0;
+  return $!{EPERM} ? 1 : 0;
+}
+
+sub process_exists {
+  my $count = kill 0, $pgid;
+  return 1 if $count > 0;
+  return $!{EPERM} ? 1 : 0;
+}
+
+sub wait_for_group {
+  my $deadline = time() + 2;
+  while (!group_exists()) {
+    return 0 unless process_exists();
+    return -1 if time() >= $deadline;
+    usleep(50_000);
+  }
+  return 1;
+}
+
+sub wait_for_exit {
+  my ($timeout_ms) = @_;
+  my $deadline = time() + ($timeout_ms / 1000);
+  while (group_exists()) {
+    return 0 if time() >= $deadline;
+    usleep(50_000);
+  }
+  return 1;
+}
+
+my $ready = wait_for_group();
+exit 0 if $ready == 0;
+if ($ready < 0) {
+  print STDERR encode_json({
+    ok => JSON::PP::false,
+    component => 'auth-process-group',
+    event => 'group-setup-timeout',
+    pgid => $pgid,
+  }) . "\n";
+  exit 75;
+}
+kill 'TERM', -$pgid;
+exit 0 if wait_for_exit($term_timeout_ms);
+kill 'KILL', -$pgid;
+exit 0 if wait_for_exit($kill_timeout_ms);
+
+print STDERR encode_json({
+  ok => JSON::PP::false,
+  component => 'auth-process-group',
+  event => 'drain-timeout',
+  pgid => $pgid,
+  termTimeoutMs => int($term_timeout_ms),
+  killTimeoutMs => int($kill_timeout_ms),
+}) . "\n";
+exit 75;

@@ -1,0 +1,84 @@
+# local and editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# dependencies and build output
+node_modules/
+venv/
+.venv/
+dist/
+build/
+coverage/
+.next/
+
+# environment and credentials
+.env
+.env.*
+!.env.example
+channel.env
+secrets.env
+webhooks.env
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# auth secrets and live token stores
+auth/channels/*/secrets.env
+auth/providers/webhooks/webhooks.env
+auth/infisical/machine-identity.env
+auth/registry.json
+auth/tools/gh/hosts.yml
+auth/tools/gcloud/*.db
+auth/tools/gcloud/.last_*
+auth/tools/gcloud/legacy_credentials/
+auth/tools/gcloud/logs/
+auth/tools/gws/.encryption_key
+auth/tools/gws/cache/
+auth/tools/gws/client_secret.json
+auth/tools/gws/credentials.enc
+auth/tools/gws/token_cache.json
+auth/tools/vercel/auth.json
+auth/tools/vercel/telemetry-*.json
+
+# runtime state: keep folder shape/docs, not live payloads
+state/**/*
+!state/**/
+!state/**/.gitkeep
+!state/README.md
+!state/**/README.md
+!state/**/*.example
+
+# browser runtime data: keep folder shape/docs, not profiles/cookies/downloads
+browser/downloads/**/*
+!browser/downloads/.gitkeep
+browser/screenshots/**/*
+!browser/screenshots/.gitkeep
+browser/scratch/**/*
+!browser/scratch/.gitkeep
+browser/tools/agent-browser/home/**/*
+!browser/tools/agent-browser/home/.gitkeep
+browser/profiles/*/**
+!browser/profiles/*/
+!browser/profiles/*/.gitkeep
+
+# deploy and tool caches
+.vercel/
+.cache/
+.npm/
+tools/payloads/
+
+# generic runtime payloads that should never be source
+*.log
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.jsonl

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["shouldReply", "reason", "body"],
+  "properties": {
+    "shouldReply": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "body": { "type": "string" }
+  }
+}

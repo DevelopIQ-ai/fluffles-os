@@ -1,0 +1,8 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+# Run a provider in a private process group. Materializers can therefore
+# terminate and reap its complete process tree before deleting credentials.
+setpgrp(0, 0) or die "auth-run-child: setpgrp failed: $!\n";
+exec @ARGV or die "auth-run-child: exec failed: $!\n";

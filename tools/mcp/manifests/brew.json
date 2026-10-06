@@ -1,0 +1,31 @@
+{
+  "name": "brew",
+  "description": "Homebrew, the machine's package manager.",
+  "tools": [
+    {
+      "name": "brew.run",
+      "description": "Homebrew operations. Pass the full brew argument list, e.g. \"list --versions node\". Arguments are passed as argv exactly as given; nothing goes through a shell.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the brew arguments, one argv entry per element"
+          }
+        },
+        "required": [
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/brew",
+        "{args...}"
+      ],
+      "timeoutMs": 300000
+    }
+  ]
+}

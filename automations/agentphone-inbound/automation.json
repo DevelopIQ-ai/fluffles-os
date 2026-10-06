@@ -1,0 +1,27 @@
+{
+  "id": "agentphone-inbound",
+  "name": "AgentPhone Inbound",
+  "description": "Forwards authenticated AgentPhone SMS, iMessage, and call events into the first-class phone channel.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "event",
+      "source": "external",
+      "event": "*"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "forward-to-phone-channel",
+      "method": "POST",
+      "url": "http://127.0.0.1:3002/webhook/phone",
+      "body": "{{event.payload}}",
+      "timeoutMs": 30000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 10
+  }
+}

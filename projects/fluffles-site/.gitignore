@@ -1,0 +1,6 @@
+node_modules/
+.vercel/
+dist/
+.DS_Store
+npm-debug.log*
+.vercel

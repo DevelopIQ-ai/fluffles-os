@@ -1,0 +1,16 @@
+{
+  "name": "fluffles-executor-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned install of the local Executor gateway the harness supervises. Callable tools are MCP integrations behind this daemon.",
+  "scripts": {
+    "build": "node -e \"require.resolve('executor/package.json')\"",
+    "test": "node_modules/.bin/executor --version"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "executor": "1.5.37"
+  }
+}

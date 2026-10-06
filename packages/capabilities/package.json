@@ -1,0 +1,19 @@
+{
+  "name": "@fluffles/capabilities",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tools and capabilities registry: MCP-manifest-derived inventory, canonical manifest health probes, durable SQLite health, and repair-task handoff to the task ledger.",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

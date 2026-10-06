@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Which harness this is comes from the account the hook runs as, so the same
+# file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+if [ "${1:-}" = "--health" ]; then
+  "${home}/bin/smoke" --help >/dev/null
+  echo "hook smoke dependency is available"
+  exit 0
+fi
+
+time_hook="${home}/hooks/codex/bin/session-time"
+memory_hook="${home}/hooks/codex/bin/memory-context"
+session_event="{\"session_id\":\"smoke-session\",\"cwd\":\"${home}\",\"transcript_path\":\"/tmp/harness-codex-hooks-transcript.jsonl\",\"model\":\"smoke\",\"permission_mode\":\"never\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}"
+
+time_output="$(
+  printf '%s\n' "$session_event" \
+    | bash "$time_hook"
+)"
+
+python3 - "$time_output" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+context = payload["hookSpecificOutput"]["additionalContext"]
+assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+assert "current session start time:" in context
+PY
+
+memory_output="$(
+  printf '%s\n' "$session_event" \
+    | bash "$memory_hook"
+)"
+
+python3 - "$memory_output" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+context = payload["hookSpecificOutput"]["additionalContext"]
+assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+assert len(context) > 0
+PY
+
+echo "codex hooks smoke test passed"

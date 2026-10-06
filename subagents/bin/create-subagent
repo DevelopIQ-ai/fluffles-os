@@ -1,0 +1,427 @@
+#!/usr/bin/env node
+const fs = require("fs");
+const fsp = require("fs/promises");
+const os = require("node:os");
+const path = require("path");
+const { assertSafeMemoryText } = require("../lib/memory/memory-safety.cjs");
+const { withFileLock, writeAtomicText } = require("../lib/memory/memory-storage.ts");
+
+const HOME = process.env.SUBAGENT_HOME || process.env.HOME || os.homedir();
+const SOURCE_HOME = process.env.SUBAGENT_SOURCE_HOME || path.join(HOME, "projects", "source-code");
+const LIVE_ROOT = path.join(HOME, "subagents");
+const SOURCE_ROOT = path.join(SOURCE_HOME, "subagents");
+const LIVE_BIN = path.join(HOME, "bin");
+const SOURCE_BIN = path.join(SOURCE_HOME, "bin");
+const CENTRAL_STATE = path.join(HOME, "state", "subagents");
+const RESERVED = new Set(["bin"]);
+const NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+const args = process.argv.slice(2);
+
+function usage() {
+  return `Usage:
+  create-subagent <name> [--mission "..."] [--domain "..."] [--force]
+  create-subagent validate [<name>]
+  create-subagent list`;
+}
+
+function fail(message, code = 1) {
+  console.error(message);
+  process.exit(code);
+}
+
+function parseCreate(argv) {
+  const result = {
+    name: null,
+    mission: "Own a focused, durable lane of work for Fluffles.",
+    domain: "general",
+    force: false
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--force") {
+      result.force = true;
+    } else if (arg === "--mission" || arg === "--domain") {
+      const value = argv[index + 1];
+      if (!value) fail(`${arg} requires a value`, 2);
+      result[arg.slice(2)] = value;
+      index += 1;
+    } else if (arg.startsWith("--mission=")) {
+      result.mission = arg.slice("--mission=".length);
+    } else if (arg.startsWith("--domain=")) {
+      result.domain = arg.slice("--domain=".length);
+    } else if (arg.startsWith("--")) {
+      fail(`unknown option: ${arg}`, 2);
+    } else if (!result.name) {
+      result.name = arg;
+    } else {
+      fail(`unexpected argument: ${arg}`, 2);
+    }
+  }
+
+  if (!result.name) fail(usage(), 2);
+  assertName(result.name);
+  return result;
+}
+
+function assertName(name) {
+  if (!NAME_RE.test(name)) {
+    fail("name must be lowercase kebab-case, start with a letter, and contain only a-z, 0-9, and hyphens", 2);
+  }
+}
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+async function persistFile(file, content, options = {}) {
+  assertSafeMemoryText(content, file);
+  await withFileLock(file, async () => {
+    if (options.ifMissing && fs.existsSync(file)) return;
+    await writeAtomicText(file, content);
+    if (options.mode) await fsp.chmod(file, options.mode);
+  });
+}
+
+async function writeFile(file, content, options = {}) {
+  await persistFile(file, content, options);
+}
+
+async function writeIfMissing(file, content, options = {}) {
+  await persistFile(file, content, { ...options, ifMissing: true });
+}
+
+function agentsContent(name, mission, domain) {
+  return `# ${name}
+
+You are ${name}, a persistent subagent in Fluffles' Mac mini harness.
+
+## identity
+
+- call name: ${name}
+- live home: \`${HOME}/subagents/${name}\`
+- source mirror: \`${HOME}/projects/source-code/subagents/${name}\`
+- domain: ${domain}
+
+## mission
+
+${mission}
+
+## authority and boundary
+
+- act inside your own subagent folder, \`${HOME}/state/subagents/${name}\`, and task-specific workspaces granted by Fluffles.
+- keep runtime receipts under \`${HOME}/state/subagents/${name}\`.
+- do not store secrets, raw credentials, tokens, cookies, or private account recovery material in this folder, memory, docs, or receipts.
+- escalate only for human-only blockers such as CAPTCHA, passkeys, missing credentials, missing access, physical-device access, or destructive action beyond the assigned task.
+
+## memory protocol
+
+- keep active state in \`memory/working.md\`.
+- keep one concise daily summary per day in \`memory/summaries/daily/\`.
+- keep operational metadata under \`${HOME}/state/subagents/${name}\`; keep exact run evidence in Stash.
+- promote only durable rules or summaries, never raw secrets.
+
+## tool rules
+
+- use \`bin/${name}\` as the local entrypoint.
+- support \`status\`, \`run <task>\`, and \`remember <text>\`.
+- prefer existing Fluffles harness tools and structured APIs over one-off scripts.
+- make changes narrow, verify them, and leave concise receipts.
+`;
+}
+
+function workingContent(name, mission, domain) {
+  return `# ${name} working memory
+
+Last updated: ${new Date().toISOString()}
+
+## active
+
+- status: scaffolded
+- mission: ${mission}
+- domain: ${domain}
+
+## blockers
+
+- none recorded.
+
+## assumptions
+
+- exact evidence is available in sanitized Stash transcripts when needed.
+
+## next
+
+- no active task yet.
+`;
+}
+
+function entrypointContent(name) {
+  return `#!/usr/bin/env node
+const fs = require("fs");
+const fsp = require("fs/promises");
+const path = require("path");
+const { spawnSync } = require("child_process");
+
+const HOME = process.env.SUBAGENT_HOME || process.env.HOME || os.homedir();
+const MEMORY_BIN = process.env.SUBAGENT_MEMORY_BIN || path.join(HOME, "subagents", "lib", "memory");
+const { assertSafeMemoryText } = require(path.join(MEMORY_BIN, "memory-safety.cjs"));
+const { migrateWorking, validateWorking } = require(path.join(MEMORY_BIN, "memory-context.ts"));
+const { withFileLock, writeAtomicText } = require(path.join(MEMORY_BIN, "memory-storage.ts"));
+const NAME = "${name}";
+const ROOT = path.join(HOME, "subagents", NAME);
+const STATE = path.join(HOME, "state", "subagents", NAME);
+const WORKING = path.join(ROOT, "memory", "working.md");
+const args = process.argv.slice(2);
+const command = args[0] || "status";
+
+function now() {
+  return new Date().toISOString();
+}
+
+async function writeReceipt(type, payload) {
+  const receipt = { subagent: NAME, type, at: now(), ...payload };
+  const stamp = receipt.at.replace(/[:.]/g, "-");
+  const file = path.join(STATE, \`\${stamp}-\${type}.json\`);
+  const serialized = JSON.stringify(receipt, null, 2);
+  await writeAtomicText(file, serialized);
+  await writeAtomicText(path.join(STATE, "last-run.json"), serialized);
+  return { receipt, file };
+}
+
+function status() {
+  const last = path.join(STATE, "last-run.json");
+  if (fs.existsSync(last)) {
+    const receipt = JSON.parse(fs.readFileSync(last, "utf8"));
+    console.log(\`\${NAME} status: \${receipt.status || receipt.type || "ok"}\`);
+    console.log(\`receipt: \${last}\`);
+    return;
+  }
+  console.log(\`\${NAME} status: scaffolded\`);
+}
+
+function runTask() {
+  const taskArgs = args.slice(1);
+  if (taskArgs.join(" ").trim().length === 0) {
+    console.error(\`\${NAME} run requires a task\`);
+    process.exit(2);
+  }
+  const result = spawnSync(path.join(HOME, "subagents", "bin", "run-subagent"), [NAME, ...taskArgs], {
+    cwd: HOME,
+    env: { ...process.env, PATH: \`\${path.join(HOME, "bin")}:\${path.join(HOME, "homebrew", "bin")}:\${process.env.PATH || ""}\` },
+    stdio: "inherit"
+  });
+  process.exit(result.status === null ? 1 : result.status);
+}
+
+async function remember() {
+  const text = args.slice(1).join(" ").trim();
+  if (!text) {
+    console.error(\`\${NAME} remember requires text\`);
+    process.exit(2);
+  }
+  assertSafeMemoryText(text, \`${name} working-memory note\`);
+  await withFileLock(WORKING, async () => {
+    const existing = await fsp.readFile(WORKING, "utf8");
+    assertSafeMemoryText(existing, WORKING);
+    const migrated = migrateWorking(existing);
+    const issues = validateWorking(migrated, \`# \${NAME} working memory\`);
+    if (issues.length > 0) throw new Error(\`working memory is incomplete: \${issues.join(", ")}\`);
+    const timestampLine = \`Last updated: \${now()}\`;
+    const updatedTimestamp = migrated.replace(/^Last updated:\\s*\\S+\\s*$/m, timestampLine);
+    const active = /^## active\\s*\\n([\\s\\S]*?)(?=^##\\s|\\s*$)/m;
+    const next = updatedTimestamp.replace(active, (section) => \`\${section.trimEnd()}\\n- \${text}\\n\\n\`);
+    assertSafeMemoryText(next, WORKING);
+    await writeAtomicText(WORKING, next);
+  });
+  const result = await writeReceipt("remember", { status: "remembered", workingPath: WORKING });
+  console.log(\`\${NAME} remember: saved\`);
+  console.log(\`receipt: \${result.file}\`);
+}
+
+async function main() {
+  if (["-h", "--help", "help"].includes(command)) {
+    console.log("Usage: ${name} <status|run|remember> [text]");
+  } else if (command === "status") {
+    status();
+  } else if (command === "run") {
+    runTask();
+  } else if (command === "remember") {
+    await remember();
+  } else {
+    console.error("Usage: ${name} <status|run|remember> [text]");
+    process.exit(2);
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});
+`;
+}
+
+function shimContent(name) {
+  return `#!/usr/bin/env sh
+exec ${path.join(HOME, "subagents", name, "bin", name)} "$@"
+`;
+}
+
+async function createSkeleton(root, name, mission, domain, force, isSource) {
+  const target = path.join(root, name);
+  if (fs.existsSync(target) && !force) fail(`subagent already exists: ${target}`, 1);
+
+  ensureDir(path.join(target, "bin"));
+  ensureDir(path.join(target, "memory", "summaries", "daily"));
+  ensureDir(path.join(target, "cron"));
+  ensureDir(path.join(target, "webhooks"));
+  ensureDir(path.join(target, "state"));
+
+  if (force || !fs.existsSync(path.join(target, "AGENTS.md"))) {
+    await writeFile(path.join(target, "AGENTS.md"), agentsContent(name, mission, domain));
+  }
+  await writeIfMissing(path.join(target, "memory", "working.md"), workingContent(name, mission, domain));
+  await writeIfMissing(path.join(target, "bin", name), entrypointContent(name), { mode: 0o755 });
+  fs.chmodSync(path.join(target, "bin", name), 0o755);
+
+  if (isSource) {
+    for (const file of [
+      path.join(target, "memory", "summaries", "daily", ".gitkeep"),
+      path.join(target, "cron", ".gitkeep"),
+      path.join(target, "webhooks", ".gitkeep"),
+      path.join(target, "state", ".gitkeep")
+    ]) {
+      await writeIfMissing(file, "placeholder\n");
+    }
+  }
+}
+
+async function createSubagent() {
+  const parsed = parseCreate(args);
+  assertSafeMemoryText(parsed.mission, "subagent mission");
+  assertSafeMemoryText(parsed.domain, "subagent domain");
+  if (!parsed.force) {
+    const existing = [path.join(LIVE_ROOT, parsed.name), path.join(SOURCE_ROOT, parsed.name)]
+      .filter((target) => fs.existsSync(target));
+    if (existing.length > 0) fail(`subagent already exists: ${existing.join(", ")}`, 1);
+  }
+  await createSkeleton(LIVE_ROOT, parsed.name, parsed.mission, parsed.domain, parsed.force, false);
+  await createSkeleton(SOURCE_ROOT, parsed.name, parsed.mission, parsed.domain, parsed.force, true);
+  ensureDir(path.join(CENTRAL_STATE, parsed.name));
+  await writeFile(path.join(LIVE_BIN, parsed.name), shimContent(parsed.name), { mode: 0o755 });
+  await writeFile(path.join(SOURCE_BIN, parsed.name), shimContent(parsed.name), { mode: 0o755 });
+  console.log(`created subagent: ${parsed.name}`);
+}
+
+function subagentNames(root) {
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && !RESERVED.has(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function executable(file) {
+  try {
+    const stat = fs.statSync(file);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function checkFile(checks, id, file, executableExpected = false) {
+  const ok = executableExpected ? executable(file) : fs.existsSync(file) && fs.statSync(file).isFile();
+  checks.push({ id, ok, path: file });
+}
+
+function checkDir(checks, id, dir) {
+  let ok = false;
+  try {
+    ok = fs.statSync(dir).isDirectory();
+  } catch {
+    ok = false;
+  }
+  checks.push({ id, ok, path: dir });
+}
+
+function checkShim(checks, name, file) {
+  let ok = false;
+  let detail = "missing";
+  const target = `${HOME}/subagents/${name}/bin/${name}`;
+  try {
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink()) {
+      detail = fs.readlinkSync(file);
+      ok = detail === target;
+    } else if (stat.isFile() && (stat.mode & 0o111) !== 0) {
+      detail = fs.readFileSync(file, "utf8").trim();
+      ok = detail.includes(`exec ${target} "$@"`);
+    }
+  } catch (error) {
+    detail = error.message;
+  }
+  checks.push({ id: "live-central-shim", ok, path: file, target, detail });
+}
+
+function validateOne(name) {
+  assertName(name);
+  const checks = [];
+  const live = path.join(LIVE_ROOT, name);
+  const source = path.join(SOURCE_ROOT, name);
+  const requiredDirs = ["bin", "memory", "memory/summaries", "memory/summaries/daily", "cron", "webhooks", "state"];
+
+  checkDir(checks, "live-root", live);
+  checkFile(checks, "live-agents", path.join(live, "AGENTS.md"));
+  for (const dir of requiredDirs) checkDir(checks, `live-${dir}`, path.join(live, dir));
+  checkFile(checks, "live-working-memory", path.join(live, "memory", "working.md"));
+  checkFile(checks, "live-entrypoint", path.join(live, "bin", name), true);
+  checkDir(checks, "central-runtime-state", path.join(CENTRAL_STATE, name));
+  checkFile(checks, "live-subagent-runner", path.join(LIVE_ROOT, "bin", "run-subagent"), true);
+  checkShim(checks, name, path.join(LIVE_BIN, name));
+
+  checkDir(checks, "source-root", source);
+  checkFile(checks, "source-agents", path.join(source, "AGENTS.md"));
+  for (const dir of requiredDirs) checkDir(checks, `source-${dir}`, path.join(source, dir));
+  checkFile(checks, "source-working-memory", path.join(source, "memory", "working.md"));
+  checkFile(checks, "source-entrypoint", path.join(source, "bin", name), true);
+  checkFile(checks, "source-subagent-runner", path.join(SOURCE_ROOT, "bin", "run-subagent"), true);
+  checkFile(checks, "source-central-shim", path.join(SOURCE_BIN, name), true);
+
+  return {
+    name,
+    ok: checks.every((check) => check.ok),
+    checks
+  };
+}
+
+function validate() {
+  const requested = args[1];
+  if (requested) assertName(requested);
+  const names = requested ? [requested] : Array.from(new Set([...subagentNames(LIVE_ROOT), ...subagentNames(SOURCE_ROOT)])).sort();
+  const results = names.map(validateOne);
+  const ok = results.every((result) => result.ok);
+  console.log(JSON.stringify({ ok, subagents: results }, null, 2));
+  if (!ok) process.exit(1);
+}
+
+function list() {
+  for (const name of subagentNames(LIVE_ROOT)) console.log(name);
+}
+
+async function main() {
+  if (args.length === 0 || ["-h", "--help", "help"].includes(args[0])) {
+    console.log(usage());
+  } else if (args[0] === "validate") {
+    validate();
+  } else if (args[0] === "list") {
+    list();
+  } else {
+    await createSubagent();
+  }
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});

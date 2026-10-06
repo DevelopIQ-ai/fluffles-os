@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+if [ "${1:-}" = "--health" ]; then
+  "${home}/bin/breadcrumb" health >/dev/null
+  echo "breadcrumb hook dependency is healthy"
+  exit 0
+fi
+
+event="${1:-${HOOK_EVENT_NAME:-unknown}}"
+tmp="$(mktemp /tmp/fluffles-breadcrumb-hook.XXXXXX)"
+cleanup() {
+  rm -f "$tmp"
+}
+trap cleanup EXIT
+
+cat > "$tmp"
+mkdir -p "${home}/state/breadcrumbs"
+(
+  "${home}/bin/breadcrumb" hook "$event" < "$tmp" >/dev/null
+) 2>>${home}/state/breadcrumbs/hook-errors.log || true

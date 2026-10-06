@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use File::Basename qw(dirname basename);
+use Fcntl qw(:DEFAULT);
+
+# This is the single executable allowlist between `infisical run` and every
+# service.  Infisical injects a whole path, so reconstructing the target
+# environment from the pre-injection baseline prevents a newly added vault
+# variable from reaching a wrapper until it is deliberately listed here.
+my %allowed = (
+  '/services/slack' => [qw(SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_SIGNING_SECRET SLACK_ALLOWED_CHANNELS SLACK_AMBIENT_CHANNELS)],
+  '/services/slack-send' => [qw(SLACK_BOT_TOKEN)],
+  '/services/email-channel' => [qw(EMAIL_WEBHOOK_SECRET)],
+  '/services/email-pubsub' => [qw(EMAIL_PUBSUB_PUSH_TOKEN AMALGM_EMAIL_INBOUND_SECRET AMALGM_EVENTS_URL)],
+  '/services/codex' => [qw(CODEX_AUTH_JSON)],
+  '/services/amalgm' => [qw(AMALGM_AUTH_JSON)],
+  '/services/github-gh' => [qw(GITHUB_TOKEN)],
+  '/services/github' => [qw(GITHUB_DEPLOY_SSH_PRIVATE_KEY_FLUFFLES_SOURCE_WRITE)],
+  '/services/gcloud' => [qw(GCLOUD_APPLICATION_DEFAULT_CREDENTIALS_JSON GCLOUD_CREDENTIALS_DB_BASE64)],
+  '/services/google-workspace' => [qw(GOOGLE_WORKSPACE_OAUTH_CREDENTIALS_JSON)],
+  '/services/phone' => [qw(PHONE_EXECUTOR_MCP_AUTHORIZATION PHONE_WEBHOOK_SECRET)],
+  '/services/phone-executor' => [qw(PHONE_EXECUTOR_MCP_AUTHORIZATION)],
+  '/services/chat-console' => [qw(CHAT_CONSOLE_PASSWORD)],
+  '/services/vercel' => [qw(VERCEL_TOKEN)],
+  '/services/webhooks' => [qw(HARNESS_WEBHOOK_SECRET GITHUB_WEBHOOK_SECRET WEBHOOK_TRIGGER_SECRET)],
+  '/services/automations' => [qw(AUTOMATIONS_EVENT_SECRET)],
+  '/accounts' => [qw(GOOGLE_ACCOUNT_EMAIL GOOGLE_ACCOUNT_PASSWORD GITHUB_ACCOUNT_EMAIL GITHUB_ACCOUNT_PASSWORD MACOS_ACCOUNT_USER MACOS_ACCOUNT_PASSWORD)],
+);
+my %managed_environment_name;
+for my $names (values %allowed) {
+  $managed_environment_name{$_} = 1 for @{$names};
+}
+
+sub private_regular_file {
+  my ($path) = @_;
+  my @stat = lstat($path);
+  return 0 unless @stat && -f _ && !-l _ && $stat[4] == $<;
+  return ($stat[2] & 0777) == 0600;
+}
+
+sub private_runtime_directory {
+  my ($path) = @_;
+  return 0 unless basename($path) =~ /^infisical-runtime\.[^\/]+$/;
+  my @stat = lstat($path);
+  return 0 unless @stat && -d _ && !-l _ && $stat[4] == $<;
+  return 0 unless ($stat[2] & 0777) == 0700;
+  my $marker = "$path/.infisical-owner";
+  my @marker_stat = lstat($marker);
+  return 0 unless @marker_stat && -f _ && !-l _ && $marker_stat[4] == $< && ($marker_stat[2] & 0777) == 0600;
+  open my $fh, '<', $marker or return 0;
+  my $owner = <$fh> // '';
+  close $fh;
+  return $owner =~ /^pid:\d+(?::[a-f0-9]{64})?\n\z/;
+}
+
+sub sensitive_environment_name {
+  my ($name) = @_;
+  return 1 if $name eq 'SSH_AUTH_SOCK' || $name eq 'SSH_ASKPASS' || $name eq 'GIT_ASKPASS'
+    || $name eq 'GOOGLE_APPLICATION_CREDENTIALS';
+  return $name =~ /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY(?:_ID)?|PRIVATE_KEY|CREDENTIALS?|AUTHORIZATION)(?:_|$)/i;
+}
+
+sub excluded_baseline_environment_name {
+  my ($name) = @_;
+  return 1 if $managed_environment_name{$name};
+  return 1 if $name eq 'INFISICAL_UNIVERSAL_AUTH_CLIENT_ID'
+    || $name eq 'INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET'
+    || $name eq 'INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN'
+    || $name eq 'INFISICAL_TOKEN';
+  return sensitive_environment_name($name);
+}
+
+sub usage { exit 64; }
+sub fail_closed { print STDERR "infisical-exec: invalid runtime boundary: $_[0]\n"; exit 78; }
+
+sub read_baseline_environment {
+  my ($baseline) = @_;
+  fail_closed('baseline file') unless private_regular_file($baseline);
+  my $runtime_dir = dirname($baseline);
+  fail_closed('runtime directory') unless private_runtime_directory($runtime_dir);
+  fail_closed('baseline name') unless basename($baseline) eq 'environment';
+  sysopen my $baseline_fh, $baseline, O_RDONLY | O_NOFOLLOW or fail_closed('baseline open');
+  local $/;
+  my $serialized = <$baseline_fh>;
+  close $baseline_fh or exit 70;
+  my %environment;
+  for my $entry (split /\0/, $serialized // '') {
+    next if $entry eq '';
+    $entry =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)\z/s or fail_closed('baseline encoding');
+    $environment{$1} = $2;
+  }
+  delete @environment{grep { excluded_baseline_environment_name($_) } keys %environment};
+  return %environment;
+}
+
+my $mode = shift @ARGV // usage();
+if ($mode eq 'validate-path') {
+  my $path = shift @ARGV // usage();
+  usage() if @ARGV || !exists $allowed{$path};
+  exit 0;
+}
+
+if ($mode eq 'managed-environment-names') {
+  usage() if @ARGV;
+  print "$_\n" for sort keys %managed_environment_name;
+  exit 0;
+}
+
+if ($mode eq 'baseline-keeps-name') {
+  my $name = shift @ARGV // usage();
+  usage() if @ARGV;
+  exit(excluded_baseline_environment_name($name) ? 1 : 0);
+}
+
+if ($mode eq 'capture-baseline') {
+  my $path = shift @ARGV // usage();
+  my $baseline = shift @ARGV // usage();
+  usage() if @ARGV || !exists $allowed{$path};
+  my $runtime_dir = dirname($baseline);
+  fail_closed('runtime directory') unless private_runtime_directory($runtime_dir);
+  fail_closed('baseline name') unless basename($baseline) eq 'environment';
+  sysopen my $baseline_fh, $baseline, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600
+    or fail_closed('baseline create');
+  for my $name (sort keys %ENV) {
+    next if excluded_baseline_environment_name($name);
+    print {$baseline_fh} "$name=$ENV{$name}\0" or exit 70;
+  }
+  close $baseline_fh or exit 70;
+  chmod 0600, $baseline or exit 70;
+  exit 0;
+}
+
+if ($mode eq 'exec-infisical') {
+  my $auth_mode = shift @ARGV // usage();
+  my $path = shift @ARGV // usage();
+  my $baseline = shift @ARGV // usage();
+  usage() unless exists $allowed{$path} && @ARGV;
+  my $separator = shift @ARGV;
+  usage() unless $separator eq '--' && @ARGV;
+  usage() unless basename($ARGV[0]) eq 'infisical';
+  my %environment = read_baseline_environment($baseline);
+  if ($auth_mode eq 'login') {
+    my $client_id = $ENV{INFISICAL_UNIVERSAL_AUTH_CLIENT_ID} // '';
+    my $client_secret = $ENV{INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET} // '';
+    fail_closed('machine identity') unless $client_id =~ /^[A-Za-z0-9-]+$/
+      && $client_secret =~ /^[A-Za-z0-9-]+$/;
+    $environment{INFISICAL_UNIVERSAL_AUTH_CLIENT_ID} = $client_id;
+    $environment{INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET} = $client_secret;
+  } elsif ($auth_mode eq 'access') {
+    my $access_token = $ENV{INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN} // '';
+    fail_closed('access token') unless $access_token =~ /^[A-Za-z0-9._-]+$/;
+    $environment{INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN} = $access_token;
+  } else {
+    usage();
+  }
+  $environment{INFISICAL_DISABLE_UPDATE_CHECK} = 'true';
+  %ENV = %environment;
+  exec { $ARGV[0] } @ARGV or exit 127;
+}
+
+usage() unless $mode eq 'exec';
+my $path = shift @ARGV // usage();
+my $baseline = shift @ARGV // usage();
+usage() unless exists $allowed{$path} && @ARGV && $ARGV[0] eq '--';
+shift @ARGV;
+usage() unless @ARGV;
+
+my %environment = read_baseline_environment($baseline);
+my $runtime_dir = dirname($baseline);
+for my $name (@{$allowed{$path}}) {
+  $environment{$name} = $ENV{$name} if exists $ENV{$name};
+}
+
+# The baseline is non-secret because infisical-run removes every managed
+# credential before writing it. Remove it and its owner marker before target
+# execution, which also makes the successful exec path crash-safe.
+unlink $baseline or exit 70;
+unlink "$runtime_dir/.infisical-owner" or exit 70;
+rmdir $runtime_dir or exit 70;
+
+%ENV = %environment;
+exec { $ARGV[0] } @ARGV or exit 127;

@@ -1,0 +1,28 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Fcntl qw(:flock);
+
+my ($lock_file, $ready_file, $parent_pid, $wait_seconds) = @ARGV;
+exit 64 unless defined $parent_pid && $parent_pid =~ /^\d+$/;
+$wait_seconds = 0 unless defined $wait_seconds;
+exit 64 unless $wait_seconds =~ /^\d+$/;
+open my $lock, '>>', $lock_file or exit 70;
+# Callers that can tolerate queueing pass a wait budget: contention between
+# short-lived wrappers is normal, and failing instantly turns it into an outage.
+my $deadline = time + $wait_seconds;
+until (flock($lock, LOCK_EX | LOCK_NB)) {
+  exit 75 if time >= $deadline;
+  exit 75 unless getppid() == $parent_pid;
+  sleep 1;
+}
+open my $ready, '>', $ready_file or exit 70;
+chmod 0600, $ready_file;
+print {$ready} "$$\n";
+close $ready;
+$SIG{TERM} = sub { exit 0 };
+$SIG{INT} = sub { exit 0 };
+$SIG{HUP} = sub { exit 0 };
+while (getppid() == $parent_pid) {
+  sleep 1;
+}

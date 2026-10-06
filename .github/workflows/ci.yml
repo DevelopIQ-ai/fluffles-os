@@ -1,0 +1,47 @@
+name: Source checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/storage/package-lock.json
+            packages/conversations/package-lock.json
+            packages/scheduler/package-lock.json
+            packages/task-registry/package-lock.json
+            packages/repair-ledger/package-lock.json
+            packages/tasks/package-lock.json
+            channels/slack/package-lock.json
+            channels/email/package-lock.json
+            channels/phone/package-lock.json
+            channels/webhooks/package-lock.json
+            channels/chat-console/package-lock.json
+            projects/fluffles-site/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install source verification tools
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep
+      - name: Verify source
+        run: deploy/scripts/verify-source.sh

@@ -1,0 +1,31 @@
+{
+  "name": "tailscale",
+  "description": "Tailscale CLI for the machine's tailnet state.",
+  "tools": [
+    {
+      "name": "tailscale.run",
+      "description": "Tailscale operations. Pass the full tailscale argument list, e.g. \"status --json\". Arguments are passed as argv exactly as given; nothing goes through a shell.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the tailscale arguments, one argv entry per element"
+          }
+        },
+        "required": [
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/tailscale",
+        "{args...}"
+      ],
+      "timeoutMs": 300000
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "$comment": [
+    "The dev harness, on the same Mac mini as production under its own account.",
+    "Everything that could collide with production is different here: the label",
+    "prefix, every port, the Slack app behind /services/slack, and the account",
+    "the services run as. Dev runs system-domain jobs like production does, so",
+    "the deploy exercises production's path, but its manifests live in its own",
+    "home rather than in the root-owned /Library/LaunchDaemons, and its sudo",
+    "rights cover only launchctl on com.puffle.dev labels. Per-user launchd",
+    "domains are supported too, and are the right shape for a host whose",
+    "account has a login session; this one is driven over ssh and has none.",
+    "Dev is where a deploy change is proven before prod.",
+    "Email and phone are absent: dev has no separate mailbox or phone number,",
+    "and pointing them at production's would answer real people.",
+    "Dev has no GitHub credential, so its origin is a local bare mirror and",
+    "mirrorUpstream names where the deployer fast-forwards that mirror from",
+    "before each poll: production's checkout, which tracks merged main."
+  ],
+  "name": "dev",
+  "home": "/Users/dev",
+  "user": "dev",
+  "group": "staff",
+  "repo": "/Users/dev/projects/source-code",
+  "ref": "origin/main",
+  "mirrorUpstream": "/Users/ai/projects/source-code",
+  "labelPrefix": "com.puffle.dev",
+  "supervisor": "launchd",
+  "domain": "system",
+  "systemDaemonRoot": "/Users/dev/Library/LaunchDaemons",
+  "alertChannel": "#dev-alerts",
+  "services": ["slack", "chat-console", "webhooks", "automations", "executor", "deploy-main"],
+  "env": {
+    "slack": {
+      "PORT": "13000"
+    },
+    "chat-console": {
+      "PORT": "13004"
+    },
+    "webhooks": {
+      "WEBHOOK_PORT": "18787"
+    },
+    "automations": {
+      "AUTOMATIONS_PORT": "18788"
+    },
+    "executor": {
+      "EXECUTOR_PORT": "14788"
+    }
+  }
+}

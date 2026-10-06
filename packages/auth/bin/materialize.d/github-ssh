@@ -1,0 +1,70 @@
+# shellcheck shell=sh
+
+# The deploy key is handed to a private ssh-agent over its socket and is never
+# written to the filesystem: ssh receives a signing oracle rather than a key.
+
+spec_state_prefix="github-ssh"
+spec_component="github-ssh"
+spec_require="GITHUB_DEPLOY_SSH_PRIVATE_KEY_FLUFFLES_SOURCE_WRITE"
+spec_unset="GITHUB_TOKEN GITHUB_DEPLOY_SSH_PRIVATE_KEY_FLUFFLES_SOURCE"
+spec_exec="/usr/bin/ssh"
+agent_pid=""
+
+spec_preflight() {
+  host=""
+  needs_value=0
+  for argument in "$@"; do
+    if [ "$needs_value" = "1" ]; then
+      needs_value=0
+      continue
+    fi
+    case "$argument" in
+      -c|-D|-E|-F|-I|-i|-J|-L|-l|-m|-O|-o|-p|-Q|-R|-S|-W|-w) needs_value=1 ;;
+      --) break ;;
+      -*) ;;
+      *) host="$argument"; break ;;
+    esac
+  done
+  case "$host" in
+    github.com|git@github.com) ;;
+    *)
+      echo "github-ssh: refusing to use GitHub deploy keys for a non-GitHub host" >&2
+      exit 64
+      ;;
+  esac
+  # The runner drops every injected variable before the provider starts, so the
+  # key is captured here and released as soon as the agent holds it.
+  deploy_key="${GITHUB_DEPLOY_SSH_PRIVATE_KEY_FLUFFLES_SOURCE_WRITE:-}"
+}
+
+spec_prepare() {
+  agent_socket="${temporary_dir}/agent.sock"
+  agent_environment="$(SSH_AUTH_SOCK="" SSH_AGENT_PID="" /usr/bin/ssh-agent -a "$agent_socket")" || {
+    echo "github-ssh: could not start the private ssh-agent" >&2
+    exit 70
+  }
+  agent_pid="$(printf '%s\n' "$agent_environment" | sed -n 's/^SSH_AGENT_PID=\([0-9][0-9]*\);.*$/\1/p')"
+  export SSH_AUTH_SOCK="$agent_socket"
+  if ! printf '%s\n' "$deploy_key" \
+    | DISPLAY="" SSH_ASKPASS_REQUIRE=never /usr/bin/ssh-add - >/dev/null 2>&1; then
+    echo "github-ssh: the injected deploy key was rejected by the ssh-agent" >&2
+    exit 78
+  fi
+  unset deploy_key
+  # The public half is written out only so ssh can name the one agent identity
+  # it is allowed to offer. Skipping the user configuration and every identity
+  # but this one is what keeps a durable key in ~/.ssh from authenticating in
+  # place of the approved deploy key.
+  if ! /usr/bin/ssh-add -L >"${temporary_dir}/identity.pub" 2>/dev/null; then
+    echo "github-ssh: the private ssh-agent holds no usable identity" >&2
+    exit 70
+  fi
+  spec_exec_arguments="-F /dev/null -o IdentitiesOnly=yes -o IdentityAgent=${agent_socket} -i ${temporary_dir}/identity.pub"
+}
+
+spec_cleanup() {
+  if [ -n "$agent_pid" ]; then
+    kill -TERM "$agent_pid" >/dev/null 2>&1 || true
+    agent_pid=""
+  fi
+}

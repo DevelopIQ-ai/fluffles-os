@@ -1,0 +1,59 @@
+# shellcheck shell=sh
+
+spec_state_prefix="gcloud-auth"
+spec_component="gcloud"
+spec_require="GCLOUD_APPLICATION_DEFAULT_CREDENTIALS_JSON GCLOUD_CREDENTIALS_DB_BASE64"
+spec_files="GCLOUD_APPLICATION_DEFAULT_CREDENTIALS_JSON:application_default_credentials.json
+  GCLOUD_CREDENTIALS_DB_BASE64:credentials.db:base64"
+spec_push="/services/gcloud:GCLOUD_APPLICATION_DEFAULT_CREDENTIALS_JSON:application_default_credentials.json
+  /services/gcloud:GCLOUD_CREDENTIALS_DB_BASE64:credentials.db:base64"
+spec_exec="${home}/homebrew/bin/gcloud"
+
+spec_validate() {
+  if ! "$node_bin" - "${temporary_dir}/application_default_credentials.json" <<'NODE'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!value || typeof value !== "object" || Array.isArray(value)
+  || typeof value.client_id !== "string" || !value.client_id
+  || typeof value.client_secret !== "string" || !value.client_secret
+  || typeof value.refresh_token !== "string" || !value.refresh_token
+  || value.type !== "authorized_user") process.exit(1);
+NODE
+  then
+    echo "gcloud: injected OAuth credentials are invalid" >&2
+    exit 78
+  fi
+  if ! /usr/bin/sqlite3 "${temporary_dir}/credentials.db" 'PRAGMA integrity_check;' | grep -Fx 'ok' >/dev/null; then
+    echo "gcloud: injected OAuth credentials are invalid" >&2
+    exit 78
+  fi
+}
+
+spec_prepare() {
+  # Keep account, project and other non-secret gcloud configuration. Credential
+  # caches are intentionally absent: the two canonical credential documents
+  # above are materialized into this isolated CLOUDSDK_CONFIG instead.
+  runtime_config_dir="${home}/state/tools/gcloud/config"
+  if [ -d "$runtime_config_dir" ] && [ ! -L "$runtime_config_dir" ]; then
+    for entry in active_config configurations default_configs.db gce; do
+      if [ -e "${runtime_config_dir}/${entry}" ] && [ ! -L "${runtime_config_dir}/${entry}" ]; then
+        cp -R "${runtime_config_dir}/${entry}" "$temporary_dir/" || exit 70
+      fi
+    done
+  fi
+  if [ -f "${temporary_dir}/configurations/config_default" ]; then
+    "$node_bin" - "${temporary_dir}/configurations/config_default" <<'NODE' || exit 70
+const fs = require("node:fs");
+const file = process.argv[2];
+let section = "";
+const safe = fs.readFileSync(file, "utf8").split(/(?<=\n)/).filter((line) => {
+  const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+  if (header) section = header[1].toLowerCase();
+  return !(section === "auth" && /^\s*credential_file_override\s*=/i.test(line));
+}).join("");
+fs.writeFileSync(file, safe, { mode: 0o600 });
+NODE
+  fi
+  export CLOUDSDK_CONFIG="$temporary_dir"
+  export CLOUDSDK_PYTHON="${home}/homebrew/bin/python3"
+}

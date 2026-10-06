@@ -1,0 +1,22 @@
+{
+  "name": "webhooks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "local webhook ingress service for the harness",
+  "main": "src/server.ts",
+  "scripts": {
+    "start": "$HOME/packages/auth/bin/infisical-run --path /services/webhooks -- $HOME/homebrew/bin/node --import tsx src/server.ts",
+    "manager": "$HOME/bin/webhooks",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run build",
+    "test": "npm run check && node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

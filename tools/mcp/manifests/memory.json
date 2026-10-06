@@ -1,0 +1,70 @@
+{
+  "name": "memory",
+  "description": "Fluffles memory: markdown files plus a derived full-text index.",
+  "required": true,
+  "tools": [
+    {
+      "name": "memory.search",
+      "description": "Full-text search across memory notes, wiki pages, and durable files. Returns matching entries with paths and snippets.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "FTS query text" },
+          "limit": { "type": "number", "description": "maximum results (default 20)" }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/memory", "search", "{query}", "--limit {limit?}"]
+    },
+    {
+      "name": "memory.get",
+      "description": "Read one memory file by path or wiki title, optionally a line range.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "description": "path or wiki title" },
+          "start": { "type": "number", "description": "1-based first line" },
+          "end": { "type": "number", "description": "1-based last line" }
+        },
+        "required": ["target"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/memory", "get", "{target}", "{start?}", "{end?}"]
+    },
+    {
+      "name": "memory.note",
+      "description": "Append text to today's daily note (working memory).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "the note to append" }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/memory", "note", "{text}"]
+    },
+    {
+      "name": "memory.context",
+      "description": "Print the always-loaded memory context block (AGENTS.md rules, MEMORY.md, people.md, recent daily notes).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/memory", "context"]
+    },
+    {
+      "name": "memory.doctor",
+      "description": "Report memory index health, durability, and unresolved links.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/memory", "doctor"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/memory", "doctor"]
+}

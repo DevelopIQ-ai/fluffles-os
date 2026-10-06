@@ -1,0 +1,184 @@
+#!/bin/sh
+set -eu
+
+# Pushes a locally refreshed credential back into Infisical.
+#
+# This is a cache refresh, not a transaction: the vault copy exists so a rebuilt
+# machine restores a live token rather than a dead one. A failed push therefore
+# leaves no pending state and never blocks a tool, because the next invocation
+# recomputes the same comparison from the value it was handed. The caller has
+# already established that the file differs from what it materialized.
+#
+# usage: auth-push <path> <secret> <file> plain|base64 [...]
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+unset INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN
+unset INFISICAL_TOKEN
+
+bin_dir="${AUTH_PUSH_BIN_DIR:-${home}/packages/auth/bin}"
+bootstrap_file="${AUTH_PUSH_BOOTSTRAP_FILE:-${home}/auth/infisical/machine-identity.env}"
+infisical_bin="${AUTH_PUSH_INFISICAL_BIN:-${home}/homebrew/bin/infisical}"
+lock_file="${AUTH_PUSH_LOCK_FILE:-${home}/state/auth-push.lock}"
+# The project is the host's, read from the same file infisical-run reads, so a
+# writeback cannot land in the wrong vault.
+project_file="${AUTH_PUSH_PROJECT_FILE:-${home}/auth/infisical/project-id}"
+project_id="${AUTH_PUSH_PROJECT_ID:-}"
+if [ -z "$project_id" ]; then
+  if [ ! -f "$project_file" ] || [ -L "$project_file" ]; then
+    echo "missing Infisical project id: $project_file" >&2
+    exit 78
+  fi
+  project_id="$(tr -d ' \t\r\n' < "$project_file")"
+fi
+environment="${AUTH_PUSH_ENVIRONMENT:-dev}"
+node_bin="${NODE:-${home}/homebrew/bin/node}"
+timeout_seconds=20
+
+breadcrumb() {
+  printf '{"ok":false,"component":"auth-push","event":"%s","secret":"%s"}\n' "$1" "${2:-}" >&2
+}
+
+[ "$#" -ge 4 ] || { echo "usage: auth-push <path> <secret> <file> plain|base64 [...]" >&2; exit 64; }
+
+umask 077
+work_dir="$("${bin_dir}/auth-temp-state" create auth-push "$$")" || exit 70
+lock_pid=""
+cleanup() {
+  if [ -n "$lock_pid" ]; then
+    kill -TERM "$lock_pid" >/dev/null 2>&1 || true
+    wait "$lock_pid" >/dev/null 2>&1 || true
+    lock_pid=""
+  fi
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+# One writer at a time. A push that cannot take the lock is simply skipped: the
+# holder is pushing the same credential family, and the next run reconciles.
+"${bin_dir}/auth-lock-holder" "$lock_file" "${work_dir}/lock-ready" "$$" 30 &
+lock_pid=$!
+attempt=0
+while [ "$attempt" -lt 35 ] && [ ! -f "${work_dir}/lock-ready" ]; do
+  kill -0 "$lock_pid" >/dev/null 2>&1 || break
+  sleep 1
+  attempt=$((attempt + 1))
+done
+if [ ! -f "${work_dir}/lock-ready" ]; then
+  breadcrumb "push-skipped-lock-held"
+  exit 0
+fi
+
+run_with_timeout() {
+  /usr/bin/perl -e '
+    my ($timeout, @command) = @ARGV;
+    my $pid = fork();
+    die "fork failed: $!\n" unless defined $pid;
+    if ($pid == 0) { exec @command or exit 127; }
+    my $timed_out = 0;
+    local $SIG{ALRM} = sub {
+      $timed_out = 1;
+      kill "TERM", $pid;
+      select undef, undef, undef, 1;
+      kill "KILL", $pid;
+    };
+    alarm $timeout;
+    while (waitpid($pid, 0) == -1 && $!{EINTR}) {}
+    my $status = $?;
+    alarm 0;
+    exit 124 if $timed_out;
+    exit 127 if $status == -1;
+    exit($status >> 8) if ($status & 127) == 0;
+    exit(128 + ($status & 127));
+  ' "$timeout_seconds" "$@"
+}
+
+client_id="$(awk -F= '$1 == "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" { print substr($0, length($1) + 2) }' "$bootstrap_file")"
+client_secret="$(awk -F= '$1 == "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET" { print substr($0, length($1) + 2) }' "$bootstrap_file")"
+if [ -z "$client_id" ] || [ -z "$client_secret" ]; then
+  breadcrumb "bootstrap-unreadable"
+  exit 77
+fi
+if ! access_token="$(INFISICAL_DISABLE_UPDATE_CHECK=true \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$client_id" \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$client_secret" \
+  run_with_timeout "$infisical_bin" login --method=universal-auth --silent --telemetry=false --plain)"; then
+  breadcrumb "authentication-failed"
+  exit 77
+fi
+unset client_id client_secret
+
+status=0
+while [ "$#" -ge 4 ]; do
+  secret_path="$1"
+  secret_name="$2"
+  secret_file="$3"
+  encoding="$4"
+  shift 4
+
+  if [ ! -f "$secret_file" ] || [ -L "$secret_file" ]; then
+    breadcrumb "source-missing" "$secret_name"
+    status=75
+    continue
+  fi
+  # A refreshed credential that no longer parses is a local corruption, not a
+  # value worth making canonical.
+  if [ "$encoding" = "plain" ] && ! "$node_bin" -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$secret_file" >/dev/null 2>&1; then
+    breadcrumb "refused-unparsable-refresh" "$secret_name"
+    status=75
+    continue
+  fi
+
+  payload_file="$secret_file"
+  if [ "$encoding" = "base64" ]; then
+    payload_file="${work_dir}/payload.base64"
+    /usr/bin/base64 <"$secret_file" | tr -d '\n' >"$payload_file" || { status=70; continue; }
+    chmod 600 "$payload_file"
+  fi
+  if [ ! -s "$payload_file" ]; then
+    breadcrumb "refused-empty-refresh" "$secret_name"
+    status=75
+    continue
+  fi
+
+  # The CLI's `name=@file` syntax is unreliable across versions (some store
+  # the literal `@path` string, replacing the credential with a filesystem
+  # path), so the value always goes through a mode-600 .env file via `--file`.
+  # That format is line-oriented: JSON payloads are written compact, and a
+  # multi-line payload that is not JSON cannot be represented and is refused.
+  set_env_file="${work_dir}/set.env"
+  if ! "$node_bin" - "$secret_name" "$payload_file" "$set_env_file" <<'NODE'
+const fs = require("node:fs");
+const [name, payloadFile, destination] = process.argv.slice(2);
+const content = fs.readFileSync(payloadFile, "utf8").replace(/\n$/, "");
+let value;
+try {
+  value = JSON.stringify(JSON.parse(content));
+} catch {
+  value = content;
+}
+if (/[\r\n]/.test(value)) process.exit(1);
+fs.writeFileSync(destination, `${name}=${value}\n`, { mode: 0o600 });
+NODE
+  then
+    breadcrumb "refused-unserializable-refresh" "$secret_name"
+    status=75
+    continue
+  fi
+  chmod 600 "$set_env_file"
+
+  if INFISICAL_DISABLE_UPDATE_CHECK=true INFISICAL_TOKEN= \
+    INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN="$access_token" \
+    run_with_timeout "$infisical_bin" secrets set --file "$set_env_file" \
+      --silent --telemetry=false --projectId="$project_id" \
+      --env="$environment" --path="$secret_path" >/dev/null 2>&1; then
+    printf '{"ok":true,"component":"auth-push","event":"credential-pushed","secret":"%s"}\n' "$secret_name" >&2
+  else
+    breadcrumb "push-failed" "$secret_name"
+    status=75
+  fi
+done
+
+exit "$status"

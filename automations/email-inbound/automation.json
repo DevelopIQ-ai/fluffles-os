@@ -1,0 +1,31 @@
+{
+  "id": "email-inbound",
+  "name": "Email Inbound",
+  "description": "Forwards inbound email events into the first-class email channel.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "event",
+      "source": "email",
+      "event": "inbound"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "forward-to-email-channel",
+      "method": "POST",
+      "url": "http://127.0.0.1:3001/webhook/email",
+      "body": {
+        "source": "automations",
+        "event": "{{event.event}}",
+        "inbound": "{{event.payload.inbound|event.payload}}"
+      },
+      "timeoutMs": 30000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 10
+  }
+}

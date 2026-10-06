@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <title>Fluffles</title>
+    <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="sidebar" aria-label="Main navigation">
+        <div class="sidebar-head">
+          <button class="icon-button" type="button" aria-label="Search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="20" y1="20" x2="16" y2="16"></line></svg>
+          </button>
+        </div>
+
+        <div class="sidebar-top">
+          <nav class="nav-main" aria-label="primary">
+            <a class="nav-item" href="#">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"></rect><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"></rect><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"></rect></svg>
+              <span class="nav-label">Home</span>
+            </a>
+            <a class="nav-item" href="#">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 9a5.5 5.5 0 0 1 11 0c0 5 2 6.5 2 6.5H4.5S6.5 14 6.5 9"></path><path d="M10.4 19a1.85 1.85 0 0 0 3.2 0"></path></svg>
+              <span class="nav-label">Notifications</span>
+              <span class="nav-dot" aria-label="new"></span>
+            </a>
+            <a class="nav-item" href="#">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M14.9 9.1 12.9 13.6a1 1 0 0 1-.5.5L7.9 16l1.6-4.6a1 1 0 0 1 .6-.6z" fill="currentColor" stroke="none"></path></svg>
+              <span class="nav-label">Explore</span>
+            </a>
+            <button class="nav-item" type="button">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span class="nav-label">New Agent</span>
+            </button>
+          </nav>
+
+          <section class="nav-group" aria-labelledby="agents-heading">
+            <h2 class="nav-group-title" id="agents-heading">Your Agents</h2>
+            <div class="nav-list" id="agent-list" role="list"></div>
+          </section>
+        </div>
+
+        <footer class="sidebar-footer">
+          <div class="user-row">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"></circle><path d="M5.5 20a6.5 6.5 0 0 1 13 0"></path></svg>
+            <span class="user-name">Kush Bhuwalka</span>
+          </div>
+          <div class="footer-row">
+            <button class="nav-item settings" type="button">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              <span class="nav-label">Settings</span>
+            </button>
+            <span class="version">v0.5.0</span>
+          </div>
+        </footer>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button class="icon-button" type="button" id="sidebar-toggle" aria-label="Toggle sidebar" aria-expanded="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><line x1="9.5" y1="4" x2="9.5" y2="20"></line></svg>
+          </button>
+          <span class="divider" aria-hidden="true"></span>
+          <span class="topbar-title" id="topbar-title">Server Location Finder</span>
+          <div class="topbar-actions">
+            <span class="status" id="topbar-status">
+              <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-dasharray="2 4"></circle></svg>
+              <span class="status-label">idle</span>
+            </span>
+            <span class="divider" aria-hidden="true"></span>
+            <button class="icon-button" type="button" aria-label="Stop agent">
+              <span class="stop-square" aria-hidden="true"></span>
+            </button>
+          </div>
+        </header>
+
+        <main class="main" aria-label="Agent workspace">
+          <div class="layout">
+            <div class="content">
+              <div class="content-head">
+                <h1 class="agent-title" id="agent-title">Server Location Finder</h1>
+                <button class="icon-button" type="button" aria-label="Agent settings">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="8" x2="14" y2="8"></line><line x1="18" y1="8" x2="20" y2="8"></line><line x1="4" y1="16" x2="10" y2="16"></line><line x1="14" y1="16" x2="20" y2="16"></line><circle cx="16" cy="8" r="2"></circle><circle cx="12" cy="16" r="2"></circle></svg>
+                </button>
+              </div>
+
+              <section class="composer" aria-label="Message composer">
+                <textarea
+                  id="composer-input"
+                  class="composer-input"
+                  rows="2"
+                  placeholder="How can I help? Press cmd+enter to send"
+                  aria-describedby="composer-hint"
+                ></textarea>
+                <div class="composer-toolbar">
+                  <div class="composer-left">
+                    <button class="chip-button icon-only" type="button" aria-label="Attach file">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 11.5l-8.4 8.4a5.5 5.5 0 0 1-7.8-7.8l8.4-8.4a3.7 3.7 0 0 1 5.2 5.2l-8.4 8.4a1.9 1.9 0 0 1-2.6-2.6l7.8-7.8"></path></svg>
+                    </button>
+                    <button class="chip-button model-chip" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <svg class="model-star" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1.6l1.5 6.1 4.6-4.2-2.6 5.7 6.3-1.1-5.4 3.4 5.4 3.4-6.3-1.1 2.6 5.7-4.6-4.2-1.5 6.1-1.5-6.1-4.6 4.2 2.6-5.7-6.3 1.1 5.4-3.4-5.4-3.4 6.3 1.1-2.6-5.7 4.6 4.2z"></path></svg>
+                      <span class="model-name"><strong>Opus 5</strong> <span class="model-tier">· Medium</span></span>
+                      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                    </button>
+                  </div>
+                  <div class="composer-right">
+                    <button class="chip-button icon-only" type="button" aria-label="Voice input">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11" rx="3"></rect><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"></path><line x1="12" y1="18" x2="12" y2="21.5"></line></svg>
+                    </button>
+                    <button class="send-button" type="button" id="send-button" aria-label="Send message">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19.5" x2="12" y2="5"></line><polyline points="6 11 12 5 18 11"></polyline></svg>
+                    </button>
+                  </div>
+                </div>
+                <p id="composer-hint" class="sr-only">This console is read-only. Interact with Fluffles through Slack, email, or phone.</p>
+              </section>
+
+              <section class="sessions" aria-labelledby="sessions-title">
+                <div class="sessions-head">
+                  <h2 class="sessions-title" id="sessions-title">Sessions</h2>
+                  <button class="icon-button small" type="button" aria-label="Sort sessions">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 8 9 5 12 8"></polyline><line x1="9" y1="5" x2="9" y2="19"></line><polyline points="12 16 15 19 18 16"></polyline><line x1="15" y1="19" x2="15" y2="5"></line></svg>
+                  </button>
+                  <button class="icon-button small" type="button" aria-label="Search sessions">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="20" y1="20" x2="16" y2="16"></line></svg>
+                  </button>
+                </div>
+                <div class="session-list" id="session-list"></div>
+              </section>
+            </div>
+
+            <aside class="rail" aria-label="Agent configuration">
+              <details class="panel" open>
+                <summary class="panel-title">
+                  <span>Triggers</span>
+                  <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                </summary>
+                <div class="panel-body">
+                  <div class="empty-box">
+                    <p class="empty-title">No triggers yet</p>
+                    <p class="empty-text">Triggers fire your agent — on a schedule (crons) or in response to events (webhooks). Your agent will create them as needed.</p>
+                  </div>
+                </div>
+              </details>
+
+              <details class="panel" open>
+                <summary class="panel-title">
+                  <span>Connections</span>
+                  <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                </summary>
+                <div class="panel-body">
+                  <div class="empty-box">
+                    <p class="empty-title">No connections yet</p>
+                    <p class="empty-text">Connect APIs or MCP servers to give your agent access to external services like Gmail or Slack.</p>
+                  </div>
+                  <div class="panel-row">
+                    <div class="logo-strip">
+                      <span class="logo-tile" aria-label="Gmail">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285f4" d="M2.4 20.4h3.3V12L2 9.2v9.9c0 .7.6 1.3 1.4 1.3z"></path><path fill="#34a853" d="M18.3 20.4h3.3c.8 0 1.4-.6 1.4-1.3V9.2L18.3 12z"></path><path fill="#fbbc04" d="M18.3 4.9V12L22 9.2V5.6c0-2-2.3-3.1-3.9-1.9z"></path><path fill="#ea4335" d="M5.7 12V4.9L12 9.6l6.3-4.7V12L12 16.7z"></path><path fill="#c5221f" d="M2 5.6v3.6L5.7 12V4.9L4.4 3.9C2.9 2.7 2 3.8 2 5.6z"></path></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="Slack">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#e01e5a" d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"></path><path fill="#36c5f0" d="M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"></path><path fill="#2eb67d" d="M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"></path><path fill="#ecb22e" d="M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"></path></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="Notion">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="3" fill="#fff" stroke="#111" stroke-width="2"></rect><path d="M8.6 16.8V7.6l6.8 8.4V7.4" fill="none" stroke="#111" stroke-width="2" stroke-linejoin="round"></path></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="GitHub">
+                        <svg viewBox="0 0 24 24" fill="#181717" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.37 1.23-3.205-.135-.3-.54-1.53.105-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.645 1.65.24 2.88.12 3.18.765.835 1.23 1.905 1.23 3.205 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"></path></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="Linear">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="#111"></circle><g stroke="#fff" stroke-width="1.1" stroke-linecap="round"><line x1="1.6" y1="14.6" x2="9.4" y2="22.4"></line><line x1="1.4" y1="11" x2="13" y2="22.6"></line><line x1="2.6" y1="7.8" x2="16.2" y2="21.4"></line></g></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="Figma">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#0acf83" d="M8.5 24a3.5 3.5 0 0 0 3.5-3.5V17H8.5a3.5 3.5 0 0 0 0 7z"></path><path fill="#a259ff" d="M5 12a3.5 3.5 0 0 1 3.5-3.5H12v7H8.5A3.5 3.5 0 0 1 5 12z"></path><path fill="#f24e1e" d="M5 3.5A3.5 3.5 0 0 1 8.5 0H12v7H8.5A3.5 3.5 0 0 1 5 3.5z"></path><path fill="#ff7262" d="M12 0h3.5a3.5 3.5 0 0 1 0 7H12z"></path><path fill="#1abcfe" d="M19 12a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0z"></path></svg>
+                      </span>
+                      <span class="logo-tile" aria-label="Atlassian">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#2684ff" d="M7.9 11.3a.6.6 0 0 0-1 .1L1.1 22.9a.6.6 0 0 0 .6.9h8a.6.6 0 0 0 .6-.4c1.7-3.6.7-9-2.4-12.1z"></path><path fill="#0052cc" d="M11.5.4a13.6 13.6 0 0 0-.8 13.4l3.9 7.7a.6.6 0 0 0 .6.4h8a.6.6 0 0 0 .6-.9S12.6.6 12.6.4a.6.6 0 0 0-1.1 0z"></path></svg>
+                      </span>
+                      <span class="logo-tile more">70+</span>
+                    </div>
+                    <button class="link-button" type="button">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5.5" x2="12" y2="18.5"></line><line x1="5.5" y1="12" x2="18.5" y2="12"></line></svg>
+                      Add Connection
+                    </button>
+                  </div>
+                </div>
+              </details>
+
+              <details class="panel" open>
+                <summary class="panel-title">
+                  <span>Skills</span>
+                  <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                </summary>
+                <div class="panel-body">
+                  <div class="empty-box">
+                    <p class="empty-title">No skills yet</p>
+                    <p class="empty-text">Skills teach your agent how to do specific tasks, like triaging emails. Your agent builds skills for you as it works.</p>
+                  </div>
+                  <div class="panel-row end">
+                    <button class="link-button" type="button">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16"></path><polyline points="8 11 12 15 16 11"></polyline><line x1="12" y1="15" x2="12" y2="4"></line></svg>
+                      Import
+                    </button>
+                  </div>
+                </div>
+              </details>
+
+              <details class="panel" open>
+                <summary class="panel-title">
+                  <span>Remote Chat</span>
+                  <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                </summary>
+                <div class="panel-body">
+                  <div class="empty-box">
+                    <p class="empty-title">Not configured yet</p>
+                    <p class="empty-text">Connect messaging to chat with this agent from anywhere.</p>
+                    <div class="chat-options">
+                      <button class="chat-option" type="button">
+                        <span class="chat-badge" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="#2aabee"></circle><path fill="#fff" d="M6 12.2l10-3.9c.5-.2.9.1.7.8l-1.7 8c-.1.6-.5.7-1 .4l-2.6-1.9-1.3 1.2c-.2.2-.4.3-.7.1l.2-2.6 4.7-4.2c.2-.2 0-.3-.3-.2l-5.8 3.6-2-.6c-.5-.2-.5-.5-.2-.7z"></path></svg>
+                        </span>
+                        <span class="chat-text"><span class="chat-eyebrow">Chat via</span><span class="chat-name">Telegram</span></span>
+                      </button>
+                      <button class="chat-option" type="button">
+                        <span class="chat-badge" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#e01e5a" d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z"></path><path fill="#36c5f0" d="M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z"></path><path fill="#2eb67d" d="M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z"></path><path fill="#ecb22e" d="M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"></path></svg>
+                        </span>
+                        <span class="chat-text"><span class="chat-eyebrow">Chat via</span><span class="chat-name">Slack</span></span>
+                      </button>
+                      <button class="chat-option" type="button">
+                        <span class="chat-badge" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="6" fill="#34c759"></rect><path fill="#fff" d="M12 5.5c-3.9 0-7 2.4-7 5.5 0 1.8 1 3.3 2.6 4.4-.2.9-.7 1.8-1.4 2.5 1.4-.1 2.6-.6 3.5-1.3.7.2 1.5.3 2.3.3 3.9 0 7-2.4 7-5.9 0-3-3.1-5.5-7-5.5z"></path></svg>
+                        </span>
+                        <span class="chat-text"><span class="chat-eyebrow">Chat via</span><span class="chat-name">iMessage</span></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <div class="panel">
+                <div class="panel-title static">
+                  <span>Agent Default Model</span>
+                  <button class="chip-button model-chip" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <svg class="model-star" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1.6l1.5 6.1 4.6-4.2-2.6 5.7 6.3-1.1-5.4 3.4 5.4 3.4-6.3-1.1 2.6 5.7-4.6-4.2-1.5 6.1-1.5-6.1-4.6 4.2 2.6-5.7-6.3 1.1 5.4-3.4-5.4-3.4 6.3 1.1-2.6-5.7 4.6 4.2z"></path></svg>
+                    <span class="model-name"><strong>Opus · latest</strong> <span class="model-tier">· Medium</span></span>
+                    <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"></polyline></svg>
+                  </button>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

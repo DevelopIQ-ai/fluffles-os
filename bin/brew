@@ -1,0 +1,39 @@
+#!/bin/zsh
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+real_brew="${home}/homebrew/bin/brew"
+user_appdir="${home}/Applications"
+
+reject_shared_appdir() {
+  print -u2 "Refusing to install Homebrew casks into /Applications."
+  print -u2 "Use ${user_appdir} for user-scoped apps on this account."
+  exit 64
+}
+
+previous_was_appdir=0
+for arg in "$@"; do
+  if [[ "${previous_was_appdir}" == "1" ]]; then
+    case "${arg}" in
+      /Applications|/Applications/)
+        reject_shared_appdir
+        ;;
+    esac
+    previous_was_appdir=0
+  fi
+
+  case "${arg}" in
+    --appdir=/Applications|--appdir=/Applications/)
+      reject_shared_appdir
+      ;;
+    --appdir)
+      previous_was_appdir=1
+      ;;
+  esac
+done
+
+export HOMEBREW_CASK_OPTS="--appdir=${user_appdir}"
+
+exec "${real_brew}" "$@"

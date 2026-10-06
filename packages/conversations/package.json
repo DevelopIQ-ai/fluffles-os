@@ -1,0 +1,28 @@
+{
+  "name": "@fluffles/conversations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Durable conversation bridge: chats, messages, runs, deliveries, leases/recovery, steering, stop, compaction, and the Executor boundary.",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "@fluffles/storage": "file:../storage"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "smoke-probe",
+  "name": "smoke-probe",
+  "description": "Executes one trivial step so a deployment can prove the automations runner works without depending on what any other automation reports.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "manual"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "smoke-probe",
+      "argv": [
+        "{{ROOT}}/bin/breadcrumb",
+        "run",
+        "--scope",
+        "fluffles",
+        "--component",
+        "automations",
+        "--kind",
+        "automation.run",
+        "--subject",
+        "smoke-probe",
+        "--source",
+        "automations",
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo smoke-probe ok"
+      ],
+      "cwd": "{{ROOT}}",
+      "timeoutMs": 60000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 1
+  }
+}

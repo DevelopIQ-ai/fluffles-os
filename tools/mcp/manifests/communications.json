@@ -1,0 +1,47 @@
+{
+  "name": "communications",
+  "description": "Fluffles communications awareness: live sessions and surface health across Slack, email, and phone.",
+  "tools": [
+    {
+      "name": "communications.current",
+      "description": "Show current communications awareness.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/communications", "current", "--json"]
+    },
+    {
+      "name": "communications.sessions",
+      "description": "Show live Codex sessions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/communications", "sessions", "--json"]
+    },
+    {
+      "name": "communications.surfaces",
+      "description": "Show communication surface health.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/communications", "surfaces", "--json"]
+    },
+    {
+      "name": "communications.health",
+      "description": "Low-risk health check for the communications tool.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/communications", "health", "--json"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/communications", "health", "--json"]
+}

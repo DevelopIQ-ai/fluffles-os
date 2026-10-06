@@ -1,0 +1,75 @@
+# shellcheck shell=sh
+
+spec_state_prefix="codex-auth"
+spec_component="codex"
+spec_require="CODEX_AUTH_JSON"
+spec_files="CODEX_AUTH_JSON:auth.json"
+spec_push="/services/codex:CODEX_AUTH_JSON:auth.json"
+spec_exec="${home}/homebrew/bin/codex"
+
+spec_validate() {
+  if ! "$node_bin" - "${temporary_dir}/auth.json" <<'NODE'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!value || typeof value !== "object" || Array.isArray(value)
+  || typeof value.auth_mode !== "string"
+  || !value.tokens || typeof value.tokens !== "object"
+  || typeof value.tokens.refresh_token !== "string" || !value.tokens.refresh_token) process.exit(1);
+NODE
+  then
+    echo "codex: injected auth state is invalid" >&2
+    exit 78
+  fi
+}
+
+spec_prepare() {
+  # Keep Codex's configuration, hooks, plugins, skills and runtime metadata. The
+  # copied config is stripped only of legacy literal credential assignments; the
+  # temporary home contains the sole auth.json visible to the child.
+  if ! "$node_bin" - "${home}"/.codex "$temporary_dir" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [source, destination] = process.argv.slice(2);
+const copy = (name) => {
+  const from = path.join(source, name);
+  const to = path.join(destination, name);
+  if (!fs.existsSync(from)) return;
+  // Dereferencing keeps the temporary home self-contained, so entries whose
+  // target is gone (plugin caches point into a cleared temporary directory)
+  // are skipped instead of aborting the copy.
+  const keep = (entry) => path.basename(entry) !== "auth.json" && fs.existsSync(entry);
+  fs.cpSync(from, to, { recursive: true, dereference: true, filter: keep });
+};
+for (const name of ["hooks.json", "plugins", "skills", "rules", "models_cache.json", "installation_id", "version.json", "packages", "node_repl", "chrome-native-hosts-v2.json"]) copy(name);
+// Session rollouts and the session index must live in the durable Codex home,
+// not the per-turn temporary home: resuming a thread on a later turn reads the
+// rollout written by the previous turn. Symlinks keep reads and writes durable
+// while the temporary home still holds the only visible auth.json.
+for (const name of ["sessions", "session_index.jsonl"]) {
+  const durable = path.join(source, name);
+  if (name === "sessions") fs.mkdirSync(durable, { recursive: true });
+  else if (!fs.existsSync(durable)) fs.writeFileSync(durable, "", { mode: 0o600 });
+  fs.symlinkSync(durable, path.join(destination, name));
+}
+const config = path.join(source, "config.toml");
+if (fs.existsSync(config)) {
+  let section = "";
+  const safe = [];
+  for (const line of fs.readFileSync(config, "utf8").split(/(?<=\n)/)) {
+    const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (header) section = header[1].toLowerCase();
+    if (section.endsWith(".http_headers") && /\b(authorization|token|secret|password)\s*=/i.test(line)) continue;
+    if (/^\s*(authorization|token|secret|password)\s*=/i.test(line)) continue;
+    safe.push(section.endsWith(".env") && /^\s*CODEX_HOME\s*=/i.test(line)
+      ? `CODEX_HOME = ${JSON.stringify(destination)}\n`
+      : line);
+  }
+  fs.writeFileSync(path.join(destination, "config.toml"), safe.join(""), { mode: 0o600 });
+}
+NODE
+  then
+    echo "codex: could not prepare the temporary Codex home" >&2
+    exit 70
+  fi
+  export CODEX_HOME="$temporary_dir"
+}

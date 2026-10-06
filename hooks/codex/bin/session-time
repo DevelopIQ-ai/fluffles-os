@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "--health" ]; then
+  date '+%Y-%m-%dT%H:%M:%S%z' >/dev/null
+  echo "session time hook clock is available"
+  exit 0
+fi
+
+if [ -n "${TZ:-}" ]; then
+  zone_name="$TZ"
+  timestamp="$(TZ="$zone_name" date '+%A, %B %d, %Y at %I:%M:%S %p %Z')"
+  iso_timestamp="$(TZ="$zone_name" date '+%Y-%m-%dT%H:%M:%S%z')"
+else
+  zone_name="system local time"
+  timestamp="$(date '+%A, %B %d, %Y at %I:%M:%S %p %Z')"
+  iso_timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+fi
+context="current session start time: ${timestamp} (${iso_timestamp}, ${zone_name}). use this as the baseline for relative dates and times unless the user or system provides a newer timestamp."
+
+printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$context"

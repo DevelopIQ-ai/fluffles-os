@@ -1,0 +1,28 @@
+{
+  "name": "@fluffles/memory",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Markdown memory: always-loaded context, daily notes, a backlinked wiki, and a derived FTS5 index. Files are the memory; the index is disposable.",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@fluffles/storage": "file:../storage"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

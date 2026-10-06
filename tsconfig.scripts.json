@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "rootDir": ".",
+    "strict": false,
+    "noImplicitAny": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "strictNullChecks": false
+  },
+  "include": [
+    "agent/**/*.ts",
+    "tools/communications/bin/**/*.ts",
+    "tools/smoke/bin/**/*.ts",
+    "tools/logs/bin/**/*.ts",
+    "tools/resources/bin/**/*.ts",
+    "tools/slack-send/bin/**/*.ts",
+    "tools/breadcrumbs/bin/**/*.ts"
+  ]
+}

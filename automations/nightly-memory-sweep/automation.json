@@ -1,0 +1,45 @@
+{
+  "id": "nightly-memory-sweep",
+  "name": "Nightly Memory Sweep",
+  "description": "Promotes durable facts from unswept daily notes into wiki pages and MEMORY.md, logs everything to PROMOTIONS.md, and reindexes.",
+  "enabled": true,
+  "triggers": [
+    {
+      "kind": "schedule",
+      "cron": "5 0 * * *",
+      "tz": "America/Los_Angeles"
+    },
+    {
+      "kind": "manual"
+    }
+  ],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "nightly-memory-sweep",
+      "argv": [
+        "{{ROOT}}/bin/breadcrumb",
+        "run",
+        "--scope",
+        "fluffles",
+        "--component",
+        "memory",
+        "--kind",
+        "automation.run",
+        "--subject",
+        "nightly-memory-sweep",
+        "--source",
+        "automations",
+        "--",
+        "{{ROOT}}/bin/memory",
+        "promote"
+      ],
+      "cwd": "{{ROOT}}",
+      "timeoutMs": 180000
+    }
+  ],
+  "limits": {
+    "maxConcurrentRuns": 1,
+    "queueLimit": 1
+  }
+}

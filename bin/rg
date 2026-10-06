@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+usage() {
+  echo "usage: rg --pattern <literal> [--path <directory>]" >&2
+  exit 64
+}
+
+pattern=""
+search_path="${home}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --health)
+      [ "$#" -eq 1 ] || usage
+      printf '%s\n' 'filesystem search health' | /usr/bin/grep -F -- 'filesystem search health' >/dev/null
+      echo "filesystem search wrapper is healthy"
+      exit 0
+      ;;
+    --pattern)
+      [ "$#" -ge 2 ] || usage
+      pattern="$2"
+      shift 2
+      ;;
+    --path)
+      [ "$#" -ge 2 ] || usage
+      search_path="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+[ -n "$pattern" ] || usage
+[ -d "$search_path" ] || { echo "search path is not a directory: $search_path" >&2; exit 66; }
+
+# This intentionally supports only literal search. It never forwards flags to grep,
+# so the stable filesystem.search capability cannot use ripgrep's --pre escape hatch.
+exec /usr/bin/grep -R -n -F -- "$pattern" "$search_path"

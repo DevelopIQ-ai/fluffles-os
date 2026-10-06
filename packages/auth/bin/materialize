@@ -1,0 +1,289 @@
+#!/bin/sh
+set -eu
+
+# One credential materializer for every tool that needs its secrets as files.
+#
+# Each tool contributes a spec in bin/materialize.d/<tool> describing only what
+# is specific to it: which injected variables it requires, which files to write
+# into the private temporary home, which binary to exec, and which credentials
+# may be pushed back to Infisical when the tool refreshes them. Everything else
+# (private state creation, owner registration, signal draining, deferred
+# cleanup, exit-code mapping) lives here once.
+#
+# Spec contract, all optional unless stated:
+#   spec_state_prefix   required, an auth-temp-state prefix
+#   spec_component      required, the name used in breadcrumbs and messages
+#   spec_require        space-separated injected variables that must be present
+#   spec_files          "VARIABLE:filename[:decoder]" entries, written mode 600
+#   spec_exec           required by the time spec_prepare returns, the binary
+#   spec_push           "path:VARIABLE:file[:base64]" entries eligible for push
+#   spec_exec_arguments leading arguments inserted before the caller's own
+#   spec_unset          extra variables to drop before the provider starts
+#   spec_persistent_dir a durable directory holding an owned credential file
+#   spec_preflight()    validates arguments before any state is created
+#   spec_validate()     inspects the written files, exits 78 when unusable
+#   spec_prepare()      populates the temporary home and exports tool variables
+#   spec_cleanup()      releases anything the spec started, on every exit path
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+bin_dir="${MATERIALIZE_BIN_DIR:-${home}/packages/auth/bin}"
+spec_dir="${MATERIALIZE_SPEC_DIR:-${bin_dir}/materialize.d}"
+node_bin="${NODE:-${home}/homebrew/bin/node}"
+
+tool="${1:-}"
+if [ -z "$tool" ]; then
+  echo "usage: materialize <tool> [args...]" >&2
+  exit 64
+fi
+shift
+
+case "$tool" in
+  */*|.*|"")
+    echo "materialize: invalid tool name" >&2
+    exit 64
+    ;;
+esac
+spec_file="${spec_dir}/${tool}"
+if [ ! -f "$spec_file" ] || [ -L "$spec_file" ]; then
+  echo "materialize: no credential spec for tool: $tool" >&2
+  exit 64
+fi
+
+spec_state_prefix=""
+spec_component="$tool"
+spec_require=""
+spec_files=""
+spec_exec=""
+spec_exec_arguments=""
+spec_push=""
+spec_persistent_dir=""
+spec_unset=""
+spec_shift=0
+spec_preflight() { :; }
+spec_validate() { :; }
+spec_prepare() { :; }
+spec_cleanup() { :; }
+
+# shellcheck source=/dev/null
+. "$spec_file"
+
+if [ -z "$spec_state_prefix" ]; then
+  echo "materialize: spec for $tool has no state prefix" >&2
+  exit 70
+fi
+
+spec_preflight "$@"
+if [ "$spec_shift" -gt 0 ]; then shift "$spec_shift"; fi
+
+for variable in $spec_require; do
+  eval "value=\${${variable}:-}"
+  if [ -z "${value:-}" ]; then
+    echo "${spec_component}: ${variable} was not injected" >&2
+    exit 78
+  fi
+done
+unset value
+
+umask 077
+temporary_dir="$("${bin_dir}/auth-temp-state" create "$spec_state_prefix" "$$")" || exit 70
+
+child_pid=""
+child_pgid=""
+cleanup_allowed=1
+lock_pid=""
+persistent_owner_group=""
+
+cleanup() {
+  spec_cleanup
+  if [ "$cleanup_allowed" -eq 1 ]; then
+    if [ -n "$spec_persistent_dir" ]; then
+      "${bin_dir}/auth-temp-state" remove-persistent \
+        "$spec_persistent_dir" "$$" "$persistent_owner_group" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$temporary_dir"
+  else
+    printf '{"ok":false,"component":"%s","event":"credential-cleanup-deferred","reason":"provider-process-group-still-live"}\n' \
+      "$spec_component" >&2
+  fi
+  if [ -n "$lock_pid" ]; then
+    kill -TERM "$lock_pid" >/dev/null 2>&1 || true
+    wait "$lock_pid" >/dev/null 2>&1 || true
+    lock_pid=""
+  fi
+}
+
+drain_child_group() {
+  if [ -z "$child_pgid" ]; then return 0; fi
+  if ! "${bin_dir}/auth-process-group" drain "$child_pgid"; then
+    cleanup_allowed=0
+    child_pgid=""
+    return 75
+  fi
+  child_pgid=""
+}
+
+terminate_child() {
+  if [ -n "$child_pid" ]; then
+    if ! "${bin_dir}/auth-process-group" drain "$child_pgid"; then
+      cleanup_allowed=0
+      child_pid=""
+      child_pgid=""
+      return 75
+    fi
+    wait "$child_pid" >/dev/null 2>&1 || true
+    child_pid=""
+    child_pgid=""
+    return 0
+  fi
+  drain_child_group
+}
+
+exit_for_signal() {
+  status="$1"
+  trap - EXIT HUP INT TERM
+  terminate_child || status=75
+  push_refreshed_credentials
+  cleanup
+  exit "$status"
+}
+
+# A credential refresh is a cache update, never a reason to fail the caller or
+# hold the tool hostage: the push runs after the provider exits, its failures
+# are breadcrumbs, and the next invocation retries from the same comparison.
+push_refreshed_credentials() {
+  [ -n "$spec_push" ] || return 0
+  arguments=""
+  for entry in $spec_push; do
+    push_path="${entry%%:*}"
+    remainder="${entry#*:}"
+    push_secret="${remainder%%:*}"
+    remainder="${remainder#*:}"
+    push_file="${remainder%%:*}"
+    push_encoding="plain"
+    if [ "$remainder" != "$push_file" ]; then push_encoding="${remainder#*:}"; fi
+    case "$push_file" in
+      /*) ;;
+      *) push_file="${temporary_dir}/${push_file}" ;;
+    esac
+    before_file="${temporary_dir}/${push_file##*/}.before"
+    [ -f "$push_file" ] && [ -f "$before_file" ] || continue
+    if cmp -s "$push_file" "$before_file"; then continue; fi
+    arguments="$arguments $push_path $push_secret $push_file $push_encoding"
+  done
+  [ -n "$arguments" ] || return 0
+  # shellcheck disable=SC2086
+  "${bin_dir}/auth-push" $arguments || true
+  spec_push=""
+}
+
+acquire_lock() {
+  lock_file="$1"
+  wait_seconds="$2"
+  ready_file="${temporary_dir}/lock-ready"
+  "${bin_dir}/auth-lock-holder" "$lock_file" "$ready_file" "$$" "$wait_seconds" &
+  lock_pid=$!
+  attempt=0
+  while [ "$attempt" -lt $((wait_seconds + 5)) ]; do
+    if [ -f "$ready_file" ]; then return 0; fi
+    if ! kill -0 "$lock_pid" >/dev/null 2>&1; then
+      wait "$lock_pid" || return $?
+      return 70
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  return 70
+}
+
+trap cleanup EXIT
+trap 'exit_for_signal 129' HUP
+trap 'exit_for_signal 130' INT
+trap 'exit_for_signal 143' TERM
+
+for entry in $spec_files; do
+  variable="${entry%%:*}"
+  remainder="${entry#*:}"
+  name="${remainder%%:*}"
+  decoder=""
+  if [ "$remainder" != "$name" ]; then decoder="${remainder#*:}"; fi
+  destination="${temporary_dir}/${name}"
+  eval "value=\${${variable}:-}"
+  case "$decoder" in
+    base64)
+      printf '%s' "$value" | tr -d '\r\n' >"${destination}.base64" || exit 70
+      if ! /usr/bin/base64 -D <"${destination}.base64" >"$destination" 2>/dev/null; then
+        /usr/bin/base64 --decode <"${destination}.base64" >"$destination" || exit 70
+      fi
+      ;;
+    line)
+      printf '%s\n' "$value" >"$destination" || exit 70
+      ;;
+    *)
+      printf '%s' "$value" >"$destination" || exit 70
+      ;;
+  esac
+  chmod 600 "$destination" || exit 70
+  unset value
+done
+
+spec_validate
+
+# The before-image is what a later push compares against, so a tool that never
+# refreshes its credential produces no write at all.
+for entry in $spec_files; do
+  remainder="${entry#*:}"
+  name="${remainder%%:*}"
+  source_file="${temporary_dir}/${name}"
+  [ -f "$source_file" ] || continue
+  cp "$source_file" "${source_file}.before" || exit 70
+  chmod 600 "${source_file}.before" || exit 70
+done
+
+for variable in $spec_require $spec_unset; do
+  unset "$variable"
+done
+
+spec_prepare "$@"
+
+if [ -z "$spec_exec" ]; then
+  echo "materialize: spec for $tool did not select an executable" >&2
+  exit 70
+fi
+
+# The explicit stdin redirect keeps the caller's pipe attached: POSIX assigns
+# /dev/null to a backgrounded command's stdin, which would starve git's ssh
+# protocol stream after the initial ref advertisement.
+# shellcheck disable=SC2086
+"${bin_dir}/auth-run-child" "$spec_exec" $spec_exec_arguments "$@" <&0 &
+child_pid=$!
+child_pgid=$child_pid
+
+# Registration exits 75 when the provider process group already finished before
+# the marker could be published (a short-lived command). The wait below still
+# collects the child and removes credentials, so only non-liveness registration
+# failures are fatal.
+registration_status=0
+"${bin_dir}/auth-temp-state" set-owner-group "$temporary_dir" "$child_pgid" || registration_status=$?
+if [ "$registration_status" -eq 0 ] && [ -n "$spec_persistent_dir" ]; then
+  "${bin_dir}/auth-temp-state" set-persistent-owner-group "$spec_persistent_dir" "$child_pgid" \
+    || registration_status=$?
+  if [ "$registration_status" -eq 0 ]; then persistent_owner_group="$child_pgid"; fi
+fi
+if [ "$registration_status" -ne 0 ] && [ "$registration_status" -ne 75 ]; then
+  terminate_child || true
+  exit 70
+fi
+
+if wait "$child_pid"; then
+  status=0
+else
+  status=$?
+fi
+child_pid=""
+drain_child_group || exit 75
+push_refreshed_credentials
+
+exit "$status"

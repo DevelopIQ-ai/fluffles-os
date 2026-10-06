@@ -1,0 +1,32 @@
+{
+  "name": "@fluffles/tasks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central task ledger for Fluffles channel adapters.",
+  "main": "dist/src/task-ledger.js",
+  "types": "dist/src/task-ledger.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/task-ledger.d.ts",
+      "default": "./dist/src/task-ledger.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@fluffles/conversations": "file:../conversations",
+    "@fluffles/repair-ledger": "file:../repair-ledger",
+    "@fluffles/scheduler": "file:../scheduler",
+    "@fluffles/storage": "file:../storage",
+    "@fluffles/task-registry": "file:../task-registry"
+  }
+}

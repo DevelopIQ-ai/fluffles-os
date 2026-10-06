@@ -1,0 +1,172 @@
+{
+  "$comment": [
+    "Every launchd job the harness owns, declared once. Placeholders are",
+    "substituted per host by deploy/bin/render-services: {{HOME}} is the",
+    "harness home, {{LABEL}} the rendered label, and {{PREFIX}} the label",
+    "prefix. Ports and any other per-host value come from the host file's",
+    "`env` overrides, keyed by service name.",
+    "`entry` is only the service's own command: every service runs under",
+    "the breadcrumb wrapper, and a service with a `secretsPath` has its",
+    "secrets injected host-side by infisical-run; the renderer derives that",
+    "scaffold so it exists in exactly one place (deploy/lib/host.mjs).",
+    "A host runs the subset of these listed in its `services` array."
+  ],
+  "services": [
+    {
+      "name": "slack",
+      "label": "{{PREFIX}}.fluffles.channel.slack",
+      "node": true,
+      "secretsPath": "/services/slack",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "--import",
+        "tsx",
+        "{{HOME}}/channels/slack/src/server.ts"
+      ],
+      "workingDirectory": "{{HOME}}/channels/slack",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {},
+      "stdout": "{{HOME}}/state/channels/slack/logs/stdout.log",
+      "stderr": "{{HOME}}/state/channels/slack/logs/stderr.log"
+    },
+    {
+      "name": "email",
+      "label": "{{PREFIX}}.fluffles.channel.email",
+      "node": true,
+      "secretsPath": "/services/email-channel",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "--import",
+        "tsx",
+        "{{HOME}}/channels/email/src/server.ts"
+      ],
+      "workingDirectory": "{{HOME}}/channels/email",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {},
+      "stdout": "{{HOME}}/state/channels/email/logs/stdout.log",
+      "stderr": "{{HOME}}/state/channels/email/logs/stderr.log"
+    },
+    {
+      "name": "phone",
+      "label": "{{PREFIX}}.fluffles.channel.phone",
+      "node": true,
+      "secretsPath": "/services/phone",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "--import",
+        "tsx",
+        "{{HOME}}/channels/phone/src/server.ts"
+      ],
+      "workingDirectory": "{{HOME}}/channels/phone",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {
+        "PHONE_POLLING_ENABLED": "0",
+        "PHONE_POLL_CALLS_ENABLED": "0"
+      },
+      "stdout": "{{HOME}}/state/channels/phone/logs/stdout.log",
+      "stderr": "{{HOME}}/state/channels/phone/logs/stderr.log"
+    },
+    {
+      "name": "chat-console",
+      "label": "{{PREFIX}}.fluffles.chat-console",
+      "node": true,
+      "secretsPath": "/services/chat-console",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "--import",
+        "tsx",
+        "{{HOME}}/channels/chat-console/src/server.ts"
+      ],
+      "workingDirectory": "{{HOME}}/channels/chat-console",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {
+        "HOST": "0.0.0.0",
+        "PORT": "3004"
+      },
+      "stdout": "{{HOME}}/state/chat-console/logs/stdout.log",
+      "stderr": "{{HOME}}/state/chat-console/logs/stderr.log"
+    },
+    {
+      "name": "webhooks",
+      "label": "{{PREFIX}}.harness.webhooks",
+      "node": true,
+      "secretsPath": "/services/webhooks",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "--import",
+        "tsx",
+        "{{HOME}}/channels/webhooks/src/server.ts"
+      ],
+      "workingDirectory": "{{HOME}}/channels/webhooks",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {
+        "WEBHOOK_HOST": "127.0.0.1",
+        "WEBHOOK_PORT": "8787",
+        "WEBHOOK_STATE_DIR": "{{HOME}}/state/webhooks"
+      },
+      "stdout": "{{HOME}}/state/webhooks/logs/service.log",
+      "stderr": "{{HOME}}/state/webhooks/logs/service.log"
+    },
+    {
+      "name": "automations",
+      "label": "{{PREFIX}}.fluffles.automations",
+      "node": true,
+      "secretsPath": "/services/automations",
+      "entry": [
+        "{{HOME}}/homebrew/bin/node",
+        "{{HOME}}/packages/automations/dist/src/cli.js",
+        "serve"
+      ],
+      "workingDirectory": "{{HOME}}",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {
+        "AUTOMATIONS_ROOT": "{{HOME}}/automations",
+        "AUTOMATIONS_STATE_DIR": "{{HOME}}/state/automations",
+        "AUTOMATIONS_HOST": "127.0.0.1",
+        "AUTOMATIONS_PORT": "8788",
+        "AUTOMATIONS_TICK_MS": "15000"
+      },
+      "stdout": "{{HOME}}/state/automations/logs/service.log",
+      "stderr": "{{HOME}}/state/automations/logs/service.log"
+    },
+    {
+      "name": "executor",
+      "label": "{{PREFIX}}.fluffles.executor",
+      "node": true,
+      "$comment": "The local tool gateway: callable tools are stdio MCP integrations behind this daemon. It holds no harness secrets; it spawns bin/mcp-serve per integration.",
+      "entry": [
+        "{{HOME}}/bin/executor-daemon"
+      ],
+      "workingDirectory": "{{HOME}}",
+      "keepAlive": true,
+      "throttleInterval": 10,
+      "env": {
+        "EXECUTOR_PORT": "4788"
+      },
+      "stdout": "{{HOME}}/state/executor/logs/service.log",
+      "stderr": "{{HOME}}/state/executor/logs/service.log"
+    },
+    {
+      "name": "deploy-main",
+      "label": "{{PREFIX}}.harness.deploy-main",
+      "entry": [
+        "{{HOME}}/bin/deploy-main"
+      ],
+      "workingDirectory": "{{HOME}}",
+      "startInterval": 60,
+      "processType": "Background",
+      "$envComment": "The alert channel is in the manifest as well as the host file, so a host file the deployer cannot read still produces an alert.",
+      "env": {
+        "DEPLOY_ALERT_CHANNEL": "{{ALERT_CHANNEL}}"
+      },
+      "stdout": "{{HOME}}/state/deploy-main/launchd.stdout.log",
+      "stderr": "{{HOME}}/state/deploy-main/launchd.stderr.log"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "gh",
+  "description": "GitHub CLI. Credentials are injected host-side from Infisical.",
+  "secrets": {
+    "path": "/services/github-gh"
+  },
+  "tools": [
+    {
+      "name": "gh.run",
+      "description": "GitHub operations: repos, issues, pull requests, CI runs. Pass the full gh argument list, e.g. \"pr view 84 --json state\". Arguments are passed as argv exactly as given; nothing goes through a shell. Credential-printing subcommands are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the gh arguments, one argv entry per element"
+          }
+        },
+        "required": [
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "command": [
+        "{{HOME}}/bin/gh",
+        "{args...}"
+      ],
+      "timeoutMs": 300000,
+      "deny": [
+        [
+          "auth"
+        ]
+      ]
+    }
+  ]
+}

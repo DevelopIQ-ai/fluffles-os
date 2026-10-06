@@ -1,0 +1,47 @@
+{
+  "name": "resources",
+  "description": "Fluffles resource monitor: pressure from agent-owned local processes, with a narrow cleanup.",
+  "tools": [
+    {
+      "name": "resources.status",
+      "description": "Inspect agent-owned resource use and write a status receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/resources", "status", "--json"]
+    },
+    {
+      "name": "resources.cleanup_preview",
+      "description": "Show what a cleanup would stop, without stopping anything.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/resources", "cleanup", "--json", "--dry-run"]
+    },
+    {
+      "name": "resources.cleanup",
+      "description": "Stop stale or runaway agent-owned browser/control processes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/resources", "cleanup", "--json"]
+    },
+    {
+      "name": "resources.health",
+      "description": "Health-check format for the harness tool health runner.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/resources", "health", "--json"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/resources", "health", "--json"]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "rg",
+  "description": "Literal filesystem search over the harness home. Intentionally literal-only: no regex, no flags forwarded.",
+  "tools": [
+    {
+      "name": "rg.search",
+      "description": "Search files for a literal string. Returns matching lines with paths and line numbers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string", "description": "the literal text to find" },
+          "path": { "type": "string", "description": "directory to search (default: the harness home)" }
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/rg", "--pattern", "{pattern}", "--path {path?}"],
+      "timeoutMs": 300000
+    }
+  ],
+  "health": ["{{HOME}}/bin/rg", "--health"]
+}

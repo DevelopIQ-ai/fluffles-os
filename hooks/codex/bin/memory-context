@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+export PATH="${home}/bin:${home}/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+if [ "${1:-}" = "--health" ]; then
+  "${home}/bin/memory" doctor >/dev/null
+  echo "memory context hook dependency is healthy"
+  exit 0
+fi
+context="$(${home}/bin/memory context 2>/dev/null || true)"
+if [ -z "$context" ]; then
+  context="memory context from memory hook: unavailable. run ${home}/bin/memory context manually."
+fi
+printf '%s' "$context" | "${home}/homebrew/bin/node" -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: input.trim()
+    }
+  }));
+});
+'

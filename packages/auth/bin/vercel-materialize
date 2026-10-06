@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+if [ -z "${VERCEL_TOKEN:-}" ]; then
+  echo "vercel: VERCEL_TOKEN was not injected" >&2
+  exit 78
+fi
+
+global_config="${home}/state/tools/vercel/config"
+cache_dir="${home}/state/tools/vercel/cache"
+mkdir -p "$global_config" "$cache_dir"
+export VERCEL_GLOBAL_CONFIG="$global_config"
+export VERCEL_CACHE_DIR="$cache_dir"
+export XDG_CACHE_HOME="$cache_dir"
+unset VERCEL_REFRESH_TOKEN
+if [ -z "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f /etc/ssl/cert.pem ]; then
+  export NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem
+fi
+
+exec "${home}/tools/payloads/npm/vercel/node_modules/.bin/vercel" --global-config "$global_config" "$@"

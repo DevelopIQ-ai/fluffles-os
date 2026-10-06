@@ -1,0 +1,1899 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Which harness this is comes from a host file, not from constants: the same
+# deployer converges production, the dev harness and a throwaway tree in ci.
+# The deployer is installed at ${home}/bin/deploy-main and lives at
+# bin/deploy-main in the source, so deploy/ is always one directory up.
+source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="${HOME:-}/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+node="${DEPLOY_NODE:-}"
+if [[ -z "$node" ]]; then
+  if [[ -x "${HOME:-}/homebrew/bin/node" ]]; then
+    node="${HOME}/homebrew/bin/node"
+  else
+    node="$(command -v node || true)"
+  fi
+fi
+if [[ -z "$node" || ! -x "$node" ]]; then
+  echo "deploy-main: no node interpreter found" >&2
+  exit 69
+fi
+# Sets host_name, home, service_user, service_group, repo, deploy_ref,
+# deploy_remote, deploy_branch, label_prefix, alert_channel,
+# supervisor_domain, system_daemon_root and service_labels.
+host_shell=""
+if ! host_shell="$("$node" "${source_root}/deploy/bin/host-config.mjs" --shell)"; then
+  # A host file this deployer cannot read means nothing gets deployed, and the
+  # host file is also where the receipt path and the alert channel come from.
+  # Fall back to the account the poller runs as so the failure is still
+  # findable and still reaches Slack, instead of dying on an unbound variable.
+  echo "deploy-main: host configuration is unusable; nothing was deployed" >&2
+  fallback_state="${HOME:-/tmp}/state/deploy-main"
+  if mkdir -p "$fallback_state" 2>/dev/null; then
+    printf '{"ok":false,"status":"host_config_failed","finishedAt":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${fallback_state}/last-run.json" || true
+  fi
+  if [[ -x "${HOME:-}/bin/slack-send" && -n "${DEPLOY_ALERT_CHANNEL:-}" ]]; then
+    "${HOME}/bin/slack-send" --channel "$DEPLOY_ALERT_CHANNEL" \
+      "deploy-main on $(hostname -s) could not read its host configuration; nothing was deployed" >/dev/null 2>&1 || true
+  fi
+  exit 78
+fi
+eval "$host_shell"
+export PATH="${home}/bin:${home}/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export GIT_SSH_COMMAND="${home}/bin/github-ssh"
+state_dir="${home}/state/deploy-main"
+receipt="${state_dir}/last-run.json"
+manifest="${state_dir}/managed-manifest.json"
+lock_dir="${state_dir}/lock"
+lock_owner_file="${lock_dir}/owner.pid"
+lock_db="${state_dir}/lock.sqlite"
+candidate="${state_dir}/candidate"
+candidate_manifest="${state_dir}/candidate-manifest.json"
+runtime_manifest="${state_dir}/runtime-manifest.json"
+changes="${state_dir}/managed-changes.json"
+manifest_stage="${state_dir}/manifest-stage"
+backups="${state_dir}/backups"
+quarantine_root="${state_dir}/quarantine"
+# The launchd locations are overridable so the whole deploy, service restart
+# included, can run against a throwaway tree off the Mac mini.
+system_daemon_root="${DEPLOY_SYSTEM_DAEMON_ROOT:-$system_daemon_root}"
+# Where this host's manifests are rendered and bootstrapped from. A user-domain
+# host has one location, its own LaunchAgents, and the host file already names
+# it; a system-domain host keeps user-domain copies beside its root-owned
+# daemons. Everything that writes or reads a manifest uses this one value.
+if [[ "$supervisor_domain" == "system" ]]; then
+  agent_root="${home}/Library/LaunchAgents"
+else
+  agent_root="$system_daemon_root"
+fi
+plistbuddy="${DEPLOY_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
+# What this launcher can offer a release's own deployer. A release declares the
+# launcher it needs in deploy/contract; a launcher that cannot meet it refuses
+# the release instead of installing it with a deployer that predates it.
+launcher_contract=1
+dry_run=0
+role=launcher
+manifest_sha=""
+candidate_manifest_sha=""
+drift_detected=false
+drift_count=0
+drain_forced=false
+quarantine_path=""
+repair_required=0
+drain_active=0
+admission_must_remain_blocked=0
+lock_token=""
+drain_timeout_ms="${DEPLOY_DRAIN_TIMEOUT_MS:-300000}"
+drain_interval_ms="${DEPLOY_DRAIN_INTERVAL_MS:-1000}"
+lock_recovery_grace_seconds="${DEPLOY_LOCK_RECOVERY_GRACE_SECONDS:-60}"
+smoke_attempts="${DEPLOY_SMOKE_ATTEMPTS:-12}"
+smoke_interval_seconds="${DEPLOY_SMOKE_INTERVAL_SECONDS:-5}"
+# launchd throttles KeepAlive respawns (about 10 seconds after an exit), and a
+# freshly killed service can crash once on a lingering listen socket before
+# its replacement binds. Readiness must wait through at least one full
+# throttle cycle, so the bound is minutes, not seconds.
+restart_wait_attempts="${DEPLOY_RESTART_WAIT_ATTEMPTS:-120}"
+restart_wait_interval_seconds="${DEPLOY_RESTART_WAIT_INTERVAL_SECONDS:-1}"
+
+while [[ "$#" -gt "0" ]]; do
+  case "$1" in
+    --dry-run) dry_run=1 ;;
+    # The second half of a handoff: the launcher has already fetched, converged
+    # and verified this release, and this is the release installing itself.
+    --apply) role=apply ;;
+    -h|--help)
+      echo "Usage: deploy-main [--dry-run] [--apply]"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 64
+      ;;
+  esac
+  shift
+done
+
+# A release's deployer runs only as part of a handoff, and only when the
+# launcher can offer the generation this release was written against. A release
+# requires the contract it provides: deploy/contract carries the same number.
+if [[ "$role" == "apply" ]]; then
+  if [[ -z "${DEPLOY_APPLY_CONTRACT:-}" || -z "${DEPLOY_APPLY_TARGET:-}" || -z "${DEPLOY_APPLY_CANDIDATE:-}" || -z "${DEPLOY_APPLY_LOCK_TOKEN:-}" ]]; then
+    echo "deploy-main --apply: no launcher handed this release a deployment to perform" >&2
+    exit 64
+  fi
+  if ! [[ "$DEPLOY_APPLY_CONTRACT" =~ ^[0-9]+$ ]] || [[ "$DEPLOY_APPLY_CONTRACT" -lt "$launcher_contract" ]]; then
+    echo "deploy-main --apply: this release needs launcher contract ${launcher_contract} and the launcher offers ${DEPLOY_APPLY_CONTRACT}" >&2
+    exit 78
+  fi
+fi
+
+if ! [[ "$drain_timeout_ms" =~ ^[0-9]+$ && "$drain_interval_ms" =~ ^[0-9]+$ && "$lock_recovery_grace_seconds" =~ ^[0-9]+$ && "$smoke_attempts" =~ ^[1-9][0-9]*$ && "$smoke_interval_seconds" =~ ^[0-9]+$ && "$restart_wait_attempts" =~ ^[1-9][0-9]*$ && "$restart_wait_interval_seconds" =~ ^[0-9]+$ ]]; then
+  echo "deploy-main: drain, smoke, restart, and lock settings must be integers" >&2
+  exit 64
+fi
+
+mkdir -p "$state_dir" "$backups" "$quarantine_root"
+
+lock_command() {
+  local action="$1"
+  local token="${2:-}"
+  "$node" - "$action" "$lock_dir" "$lock_owner_file" "$lock_db" "$lock_recovery_grace_seconds" "$$" "$token" <<'NODE'
+const { execFileSync } = require("node:child_process");
+const { randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
+const [action, lockDir, ownerFile, dbPath, graceValue, ownerPidValue, expectedToken] = process.argv.slice(2);
+const graceSeconds = Number(graceValue);
+const ownerPid = Number(ownerPidValue);
+
+function processStartedAt(pid) {
+  try {
+    return execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trimEnd();
+  } catch {
+    return "";
+  }
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === "EPERM";
+  }
+}
+
+function readOwner() {
+  try {
+    const [pidValue, startedAt, token] = fs.readFileSync(ownerFile, "utf8").trimEnd().split("\t");
+    const pid = Number(pidValue);
+    if (!Number.isSafeInteger(pid) || pid < 1 || !startedAt) return null;
+    return { pid, startedAt, token: token || null };
+  } catch {
+    return null;
+  }
+}
+
+function legacyDeploymentIsAlive() {
+  try {
+    return execFileSync("/bin/ps", ["-axo", "pid=,command="], { encoding: "utf8" })
+      .split("\n")
+      .some((line) => {
+        const match = line.trim().match(/^(\d+)\s+(.+)$/);
+        if (!match || Number(match[1]) === ownerPid || Number(match[1]) === process.pid) return false;
+        return /(?:^|\s)(?:\S*\/)?bin\/deploy-main(?:\s|$)/.test(match[2]);
+      });
+  } catch {
+    return true;
+  }
+}
+
+function lockIsLive() {
+  const owner = readOwner();
+  if (owner) {
+    const startedAt = processStartedAt(owner.pid);
+    return startedAt ? startedAt === owner.startedAt : processExists(owner.pid);
+  }
+  if (legacyDeploymentIsAlive()) return true;
+  try {
+    return (Date.now() - fs.statSync(lockDir).mtimeMs) < graceSeconds * 1000;
+  } catch {
+    return false;
+  }
+}
+
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const db = new DatabaseSync(dbPath);
+db.exec("PRAGMA busy_timeout = 5000");
+db.exec("BEGIN IMMEDIATE");
+try {
+  if (action === "acquire") {
+    if (fs.existsSync(lockDir)) {
+      if (lockIsLive()) {
+        db.exec("COMMIT");
+        process.exit(75);
+      }
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+    const startedAt = processStartedAt(ownerPid);
+    if (!startedAt) throw new Error("could not determine deployment lock owner identity");
+    const token = randomUUID();
+    fs.mkdirSync(lockDir);
+    const stage = path.join(lockDir, `.owner.${process.pid}`);
+    fs.writeFileSync(stage, `${ownerPid}\t${startedAt}\t${token}\n`);
+    fs.renameSync(stage, ownerFile);
+    db.exec("COMMIT");
+    process.stdout.write(token);
+  } else if (action === "release") {
+    const owner = readOwner();
+    if (owner && owner.token === expectedToken) {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+    db.exec("COMMIT");
+  } else {
+    throw new Error(`unsupported deployment lock action: ${action}`);
+  }
+} catch (error) {
+  try { db.exec("ROLLBACK"); } catch {}
+  throw error;
+} finally {
+  db.close();
+}
+NODE
+}
+
+# The launcher holds the lock for the whole run, handoff included: a release's
+# deployer is a child of the process holding it, so it inherits ownership rather
+# than taking a second lock or releasing one that is not its own.
+if [[ "$role" == "apply" ]]; then
+  lock_command() {
+    case "$1" in
+      acquire) printf '%s' "$DEPLOY_APPLY_LOCK_TOKEN" ;;
+      release) : ;;
+      *) return 64 ;;
+    esac
+  }
+fi
+
+if lock_token="$(lock_command acquire)"; then
+  :
+else
+  lock_status=$?
+  if [[ "$lock_status" != "75" ]]; then
+    echo "deploy-main: could not safely acquire the deployment lock" >&2
+    exit 1
+  fi
+  echo "deploy-main: another run is active"
+  exit 0
+fi
+
+# Admission control is driven from a tree the deployment is not rewriting. In a
+# handoff that is the candidate worktree: it is the code being installed, its
+# dependencies were installed by the verification that just passed, and unlike
+# the source checkout and the live tree nothing in this run touches it. A deploy
+# could otherwise finish and then fail to reopen admission because the checkout
+# it asked had just been replaced underneath it.
+task_control_root="$repo"
+if [[ "$role" == "apply" ]]; then
+  task_control_root="${DEPLOY_APPLY_CANDIDATE:-$repo}"
+fi
+
+task_control() {
+  (
+    cd "$task_control_root"
+    "$node" --import tsx packages/tasks/src/task-control.ts "$@"
+  )
+}
+
+resume_normal() {
+  if ! task_control set normal >/dev/null; then
+    return 1
+  fi
+  drain_active=0
+  return 0
+}
+
+cleanup() {
+  if [[ "$drain_active" == "1" && "$admission_must_remain_blocked" != "1" ]]; then
+    resume_normal >/dev/null 2>&1 || true
+  fi
+  # The candidate worktree belongs to the launcher, and a release's deployer is
+  # still running out of it as it exits. The launcher tidies up after it.
+  if [[ "$role" == "apply" ]]; then
+    return
+  fi
+  git -C "$repo" worktree remove --force "$candidate" >/dev/null 2>&1 || true
+  rm -rf "$manifest_stage" "$candidate_manifest" "$runtime_manifest" "$changes"
+  if [[ -n "$lock_token" ]]; then
+    lock_command release "$lock_token" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+write_receipt() {
+  local ok="$1"
+  local status="$2"
+  local previous_sha="${3:-}"
+  local target_sha="${4:-}"
+  local deployed_sha="${5:-}"
+  local rollback="${6:-false}"
+  local message="${7:-}"
+  "$node" - "$receipt" "$ok" "$status" "$previous_sha" "$target_sha" "$deployed_sha" "$rollback" "$message" "$manifest_sha" "$drift_detected" "$drift_count" "$changes" "$drain_forced" "$quarantine_path" "$manifest" "$repo" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [receipt, ok, status, previousSha, targetSha, deployedSha, rollback, message, manifestSha, driftDetected, driftCount, changesPath, drainForced, quarantinePath, manifestPath, repoPath] = process.argv.slice(2);
+let changes = { added: [], modified: [], deleted: [] };
+try {
+  const parsed = JSON.parse(fs.readFileSync(changesPath, "utf8"));
+  if (Array.isArray(parsed.added) && Array.isArray(parsed.modified) && Array.isArray(parsed.deleted)) changes = parsed;
+} catch {}
+const value = {
+  ok: ok === "true",
+  status,
+  ranAt: new Date().toISOString(),
+  previousSha: previousSha || null,
+  targetSha: targetSha || null,
+  deployedSha: deployedSha || null,
+  rollback: rollback === "true",
+  message: message || null,
+  manifestPath: manifestSha ? manifestPath : null,
+  manifestSha: manifestSha || null,
+  driftDetected: driftDetected === "true",
+  driftCount: Number(driftCount) || 0,
+  drainForced: drainForced === "true",
+  quarantinePath: quarantinePath || null,
+  addedManagedPaths: changes.added,
+  modifiedManagedPaths: changes.modified,
+  deletedManagedPaths: changes.deleted,
+  repo: repoPath
+};
+fs.mkdirSync(path.dirname(receipt), { recursive: true });
+fs.writeFileSync(receipt, `${JSON.stringify(value, null, 2)}\n`);
+NODE
+}
+
+receipt_deployed_sha() {
+  "$node" - "$receipt" <<'NODE'
+const fs = require("node:fs");
+const receipt = process.argv[2];
+try {
+  const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
+  if (value.ok === true && typeof value.deployedSha === "string") process.stdout.write(value.deployedSha);
+} catch {}
+NODE
+}
+
+receipt_status() {
+  "$node" - "$receipt" <<'NODE'
+const fs = require("node:fs");
+const receipt = process.argv[2];
+try {
+  const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
+  if (typeof value.status === "string") process.stdout.write(value.status);
+} catch {}
+NODE
+}
+
+receipt_manifest_sha() {
+  "$node" - "$receipt" <<'NODE'
+const fs = require("node:fs");
+const receipt = process.argv[2];
+try {
+  const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
+  if (value.ok === true && /^[0-9a-f]{64}$/.test(value.manifestSha || "")) process.stdout.write(value.manifestSha);
+} catch {}
+NODE
+}
+
+# Read straight out of the ledger, not through the release's own cli. The
+# launcher runs before the handoff, against a checkout that has already moved to
+# the release: step 4 moved tasks/ under packages/, and a launcher asking the
+# checkout where it kept task-control could no longer find it, so every deploy
+# failed before it began. A table is a far more stable thing for the permanent
+# piece to depend on than a path, and it only ever reads.
+deployment_lifecycle_state() {
+  "$node" - "${home}/state/tasks/tasks.sqlite" <<'NODE'
+const { DatabaseSync } = require("node:sqlite");
+try {
+  const database = new DatabaseSync(process.argv[2], { readOnly: true });
+  const row = database.prepare("SELECT state FROM deployment_lifecycle WHERE id = 1").get();
+  database.close();
+  if (!row || !["normal", "draining", "deploying", "restarting"].includes(row.state)) process.exit(1);
+  process.stdout.write(row.state);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+manifest_sha_for() {
+  local manifest_path="$1"
+  "$node" - "$manifest_path" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+try {
+  const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  const computedManifestSha = Array.isArray(value.entries)
+    ? crypto.createHash("sha256").update(JSON.stringify(value.entries)).digest("hex")
+    : null;
+  if (value.version !== 1 || !/^[0-9a-f]{64}$/.test(value.manifestSha || "") || !computedManifestSha || computedManifestSha !== value.manifestSha) {
+    process.exit(1);
+  }
+  process.stdout.write(value.manifestSha);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+manifest_deployed_sha_for() {
+  local manifest_path="$1"
+  "$node" - "$manifest_path" <<'NODE'
+const fs = require("node:fs");
+try {
+  const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  if (value.version !== 1 || !Array.isArray(value.entries) || !/^[0-9a-f]{40}$/.test(value.deployedSha || "")) {
+    process.exit(1);
+  }
+  process.stdout.write(value.deployedSha);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+migrate_manifest_ownership() {
+  local manifest_path="$1"
+  local receipt_path="$2"
+  "$node" - "$manifest_path" "$receipt_path" "$manifest" "${runtime_owned_path_patterns[@]}" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const [manifestPath, receiptPath, receiptManifestPath, ...runtimeOwnedPatterns] = process.argv.slice(2);
+const hashEntries = (entries) => crypto.createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+const regexpSpecial = new Set(["\\", "^", "$", ".", "+", "(", ")", "[", "]", "{", "}", "|"]);
+const globToRegex = (pattern) => new RegExp(`^${[...pattern].map((character) => {
+  if (character === "*") return "[^/]*";
+  if (character === "?") return "[^/]";
+  return regexpSpecial.has(character) ? `\\${character}` : character;
+}).join("")}$`);
+const runtimeOwned = runtimeOwnedPatterns.map(globToRegex);
+const writeAtomically = (file, value) => {
+  const temporary = `${file}.${process.pid}.new`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(temporary, file);
+};
+
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+if (manifest.version !== 1 || !Array.isArray(manifest.entries) || hashEntries(manifest.entries) !== manifest.manifestSha) {
+  process.exit(1);
+}
+const priorManifestSha = manifest.manifestSha;
+const entries = manifest.entries.filter((entry) => !runtimeOwned.some((pattern) => pattern.test(entry.path)));
+const ownershipChanged = entries.length !== manifest.entries.length;
+if (ownershipChanged) {
+  manifest.entries = entries;
+  manifest.manifestSha = hashEntries(entries);
+  manifest.generatedAt = new Date().toISOString();
+}
+let receipt = null;
+try {
+  receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+} catch {
+  // A missing or malformed prior receipt already prevents an up-to-date skip.
+  // It must not block a safe manifest ownership migration and later redeploy.
+}
+if (
+  ownershipChanged
+  && receipt?.ok === true
+  && receipt.deployedSha === manifest.deployedSha
+  && [priorManifestSha, manifest.manifestSha].includes(receipt.manifestSha)
+) {
+  receipt.manifestSha = manifest.manifestSha;
+  receipt.manifestPath = receiptManifestPath;
+  writeAtomically(receiptPath, receipt);
+}
+if (ownershipChanged) writeAtomically(manifestPath, manifest);
+NODE
+}
+
+verify_runtime_for_skip() {
+  local manifest_path="$1"
+  local runtime_root="$2"
+  local expected_sha="$3"
+  local recorded_manifest_sha
+  local manifest_deployed_sha
+  local receipt_manifest_sha_value
+  local check_status
+
+  if [[ ! -f "$manifest_path" ]]; then
+    return 1
+  fi
+  if ! recorded_manifest_sha="$(manifest_sha_for "$manifest_path")"; then
+    return 2
+  fi
+  manifest_sha="$recorded_manifest_sha"
+  if ! manifest_deployed_sha="$(manifest_deployed_sha_for "$manifest_path")"; then
+    return 2
+  fi
+  if [[ "$manifest_deployed_sha" != "$expected_sha" ]]; then
+    return 2
+  fi
+  if ! receipt_manifest_sha_value="$(receipt_manifest_sha)"; then
+    return 2
+  fi
+  if [[ "$receipt_manifest_sha_value" != "$recorded_manifest_sha" ]]; then
+    return 2
+  fi
+  if drift_count="$(check_managed_drift "$manifest_path" "$runtime_root")"; then
+    return 0
+  else
+    check_status=$?
+  fi
+  drift_detected=true
+  if [[ "$check_status" == "2" ]]; then
+    return 2
+  fi
+  return 1
+}
+
+write_managed_manifest() {
+  local source_root="$1"
+  local output="$2"
+  local source_sha="$3"
+  if ! rm -rf "$manifest_stage"; then
+    return 1
+  fi
+  if ! mkdir -p "$manifest_stage"; then
+    return 1
+  fi
+  if ! copy_managed "$source_root" "$manifest_stage"; then
+    return 1
+  fi
+  "$node" - "$manifest_stage" "$output" "$source_sha" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const [root, output, deployedSha] = process.argv.slice(2);
+const entries = [];
+
+function walk(directory, prefix = "") {
+  for (const name of fs.readdirSync(directory).sort()) {
+    const absolute = path.join(directory, name);
+    const relative = path.posix.join(prefix, name);
+    const stat = fs.lstatSync(absolute);
+    if (stat.isDirectory()) {
+      walk(absolute, relative);
+    } else if (stat.isFile()) {
+      entries.push({ path: relative, type: "file", sha256: crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex") });
+    } else if (stat.isSymbolicLink()) {
+      entries.push({ path: relative, type: "symlink", target: fs.readlinkSync(absolute) });
+    }
+  }
+}
+
+walk(root);
+const manifestSha = crypto.createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+const value = { version: 1, deployedSha, generatedAt: new Date().toISOString(), manifestSha, entries };
+fs.writeFileSync(output, `${JSON.stringify(value, null, 2)}\n`);
+NODE
+  return $?
+}
+
+check_managed_drift() {
+  local manifest_path="$1"
+  local runtime_root="$2"
+  local change_count
+  if ! write_managed_manifest "$runtime_root" "$runtime_manifest" runtime; then
+    echo "deploy-main: could not snapshot the managed runtime tree" >&2
+    return 2
+  fi
+  if ! write_managed_changes "$runtime_manifest" "$manifest_path" "$changes"; then
+    echo "deploy-main: could not compare the managed runtime tree" >&2
+    return 2
+  fi
+  if ! change_count="$(managed_changes_count "$changes")"; then
+    echo "deploy-main: managed runtime change plan is invalid" >&2
+    return 2
+  fi
+  if [[ "$change_count" == "0" ]]; then
+    printf '0'
+    return 0
+  fi
+  echo "deploy-main: local drift in ${change_count} source-managed path(s)" >&2
+  printf '%s' "$change_count"
+  return 1
+}
+
+runtime_matches_manifest() {
+  local expected_manifest="$1"
+  local runtime_root="$2"
+  check_managed_drift "$expected_manifest" "$runtime_root" >/dev/null 2>&1
+}
+
+write_managed_changes() {
+  local current_manifest="$1"
+  local desired_manifest="$2"
+  local output="$3"
+  "$node" - "$current_manifest" "$desired_manifest" "$output" <<'NODE'
+const fs = require("node:fs");
+const [currentPath, desiredPath, output] = process.argv.slice(2);
+const read = (file) => {
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (value.version !== 1 || !Array.isArray(value.entries)) throw new Error(`invalid manifest: ${file}`);
+  return value.entries;
+};
+const signature = (entry) => entry.type === "file" ? `${entry.type}:${entry.sha256}` : `${entry.type}:${entry.target}`;
+const current = new Map(read(currentPath).map((entry) => [entry.path, entry]));
+const desired = new Map(read(desiredPath).map((entry) => [entry.path, entry]));
+const added = [];
+const modified = [];
+const deleted = [];
+for (const [file, entry] of desired) {
+  const prior = current.get(file);
+  if (!prior) added.push(file);
+  else if (signature(prior) !== signature(entry)) modified.push(file);
+}
+for (const file of current.keys()) {
+  if (!desired.has(file)) deleted.push(file);
+}
+for (const paths of [added, modified, deleted]) paths.sort();
+fs.writeFileSync(output, `${JSON.stringify({ added, modified, deleted }, null, 2)}\n`);
+NODE
+  return $?
+}
+
+managed_changes_count() {
+  local changes_path="$1"
+  "$node" - "$changes_path" <<'NODE'
+const fs = require("node:fs");
+try {
+  const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  if (![value.added, value.modified, value.deleted].every(Array.isArray)) process.exit(1);
+  process.stdout.write(String(value.added.length + value.modified.length + value.deleted.length));
+} catch {
+  process.exit(1);
+}
+NODE
+  return $?
+}
+
+remove_deleted_managed_paths() {
+  local current_manifest="$1"
+  local desired_manifest="$2"
+  local runtime_root="$3"
+  "$node" - "$current_manifest" "$desired_manifest" "$runtime_root" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [currentPath, desiredPath, runtimeRoot] = process.argv.slice(2);
+const read = (file) => {
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (value.version !== 1 || !Array.isArray(value.entries)) throw new Error(`invalid manifest: ${file}`);
+  return value.entries;
+};
+const resolve = (relative) => {
+  const absolute = path.resolve(runtimeRoot, relative);
+  if (!absolute.startsWith(`${runtimeRoot}${path.sep}`)) throw new Error(`unsafe manifest path: ${relative}`);
+  return absolute;
+};
+const current = read(currentPath);
+const desired = new Map(read(desiredPath).map((entry) => [entry.path, entry]));
+const deleted = current.filter((entry) => !desired.has(entry.path)).sort((a, b) => b.path.length - a.path.length);
+for (const entry of deleted) {
+  const absolute = resolve(entry.path);
+  try {
+    const stat = fs.lstatSync(absolute);
+    if (stat.isDirectory()) throw new Error(`managed path became a directory: ${entry.path}`);
+    fs.unlinkSync(absolute);
+  } catch (error) {
+    if (error && error.code === "ENOENT") continue;
+    throw error;
+  }
+  for (let directory = path.dirname(absolute); directory !== runtimeRoot; directory = path.dirname(directory)) {
+    try {
+      fs.rmdirSync(directory);
+    } catch (error) {
+      if (error && (error.code === "ENOTEMPTY" || error.code === "ENOENT")) break;
+      throw error;
+    }
+  }
+}
+
+// rsync will not delete a directory that still holds files it was told to
+// exclude, so a directory left with nothing but build output blocks the exact
+// sync from then on. A release that added a package and failed left its
+// node_modules and dist behind, the rollback reported itself incomplete with
+// admission blocked, and every later deploy failed on the same leftover. A
+// directory the release does not have, holding nothing a deploy did not derive,
+// is retired. Anything holding a file the release did not derive, the
+// runtime-owned memory surface included, is left alone.
+const derivedNames = new Set(["node_modules", "dist", "build"]);
+const managedDirectories = new Set();
+for (const relative of desired.keys()) {
+  const segments = relative.split("/");
+  for (let count = 1; count < segments.length; count += 1) managedDirectories.add(segments.slice(0, count).join("/"));
+}
+const holdsOnlyDerivedOutput = (absolute) => {
+  for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (derivedNames.has(entry.name)) continue;
+      if (!holdsOnlyDerivedOutput(path.join(absolute, entry.name))) return false;
+      continue;
+    }
+    if (!entry.name.endsWith(".tsbuildinfo")) return false;
+  }
+  return true;
+};
+const retireDerivedOnlyDirectories = (relative) => {
+  for (const entry of fs.readdirSync(resolve(relative), { withFileTypes: true })) {
+    if (!entry.isDirectory() || derivedNames.has(entry.name)) continue;
+    const child = `${relative}/${entry.name}`;
+    if (managedDirectories.has(child)) {
+      retireDerivedOnlyDirectories(child);
+    } else if (holdsOnlyDerivedOutput(resolve(child))) {
+      fs.rmSync(resolve(child), { recursive: true, force: true });
+    }
+  }
+};
+// Both manifests name the roots to walk: a release that drops a directory the
+// running one had is the case that leaves output behind.
+const roots = new Set([...current.map((entry) => entry.path), ...desired.keys()].map((relative) => relative.split("/")[0]));
+for (const root of roots) {
+  try {
+    if (!fs.statSync(resolve(root)).isDirectory()) continue;
+    retireDerivedOnlyDirectories(root);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+}
+for (const entry of desired.values()) {
+  const absolute = resolve(entry.path);
+  try {
+    if (fs.lstatSync(absolute).isDirectory()) fs.rmdirSync(absolute);
+  } catch (error) {
+    if (error && error.code === "ENOENT") continue;
+    throw error;
+  }
+}
+NODE
+  return $?
+}
+
+persist_manifest() {
+  local source_manifest="$1"
+  local destination_manifest="$2"
+  local temporary_manifest="${destination_manifest}.new.$$"
+  if ! cp "$source_manifest" "$temporary_manifest"; then
+    return 1
+  fi
+  if ! mv "$temporary_manifest" "$destination_manifest"; then
+    rm -f "$temporary_manifest" || true
+    return 1
+  fi
+  return 0
+}
+
+common_excludes=(
+  --exclude '.DS_Store'
+  --exclude '.git/'
+  --exclude 'node_modules/'
+  --exclude '.vercel/'
+  --exclude '.env'
+  --exclude '.env.*'
+  --exclude 'channel.env'
+  --exclude 'secrets.env'
+  --exclude 'webhooks.env'
+  --exclude '*.pem'
+  --exclude '*.key'
+  --exclude '*.p12'
+  --exclude '*.pfx'
+  --exclude 'id_rsa'
+  --exclude 'id_ed25519'
+  --exclude '*.log'
+  --exclude '*.sqlite'
+  --exclude '*.sqlite-*'
+  --exclude '*.sqlite3'
+  --exclude '*.sqlite3-*'
+  --exclude '*.db'
+  --exclude '*.db-*'
+  --exclude '*.jsonl'
+  --exclude 'logs/'
+  --exclude 'cache/'
+  --exclude 'caches/'
+  --exclude '.cache/'
+  --exclude 'venv/'
+  --exclude '.venv/'
+  --exclude 'dist/'
+  --exclude 'build/'
+  --exclude 'coverage/'
+  --exclude 'payloads/'
+  --exclude '_health/'
+)
+
+# These are written by the live harness, never by reviewed source. The whole
+# runtime memory surface is runtime-owned: daily notes, the durable files the
+# nightly sweep rewrites, wiki pages, the promotions ledger, and quarantine.
+# Legacy daily summaries stay protected until their one-time migration into
+# daily notes is done. Subagents write dated summaries both directly under
+# memory/summaries and under a daily/ subdirectory, so both layouts stay
+# runtime-owned. Patterns must be full relative paths (globs do not cross
+# slashes): they double as rsync excludes and as manifest ownership globs.
+runtime_owned_path_patterns=(
+  'memory/????-??-??.md'
+  'memory/MEMORY.md'
+  'memory/people.md'
+  'memory/PROMOTIONS.md'
+  'memory/wiki/*'
+  'memory/quarantine/*'
+  'memory/summaries/daily/????-??-??.md'
+  'subagents/*/memory/summaries/daily/????-??-??.md'
+  'subagents/*/memory/summaries/????-??-??.md'
+)
+runtime_owned_excludes=()
+for runtime_owned_path_pattern in "${runtime_owned_path_patterns[@]}"; do
+  runtime_owned_excludes+=(--exclude "$runtime_owned_path_pattern")
+done
+
+managed_paths=(
+  AGENTS.md
+  package.json
+  package-lock.json
+  tsconfig.scripts.json
+  agent
+  bin
+  automations
+  channels
+  deploy
+  hooks
+  memory
+  packages
+  skills
+  subagents
+  tools
+)
+
+copy_managed() {
+  local source_root="$1"
+  local destination_root="$2"
+  local exact="${3:-false}"
+  local rsync_options=(-a)
+  if [[ "$exact" == "true" ]]; then
+    rsync_options+=(--checksum --delete)
+  fi
+  if ! mkdir -p "$destination_root"; then
+    return 1
+  fi
+  for rel in "${managed_paths[@]}"; do
+    if [[ -e "${source_root}/${rel}" ]]; then
+      if ! rsync "${rsync_options[@]}" "${common_excludes[@]}" "${runtime_owned_excludes[@]}" "${source_root}/${rel}" "${destination_root}/"; then
+        return 1
+      fi
+    fi
+  done
+  if [[ -d "${source_root}/fluffles-site" ]]; then
+    if ! mkdir -p "${destination_root}/projects"; then
+      return 1
+    fi
+    if ! rsync "${rsync_options[@]}" "${common_excludes[@]}" "${runtime_owned_excludes[@]}" "${source_root}/fluffles-site" "${destination_root}/projects/"; then
+      return 1
+    fi
+  elif [[ -d "${source_root}/projects/fluffles-site" ]]; then
+    if ! mkdir -p "${destination_root}/projects"; then
+      return 1
+    fi
+    if ! rsync "${rsync_options[@]}" "${common_excludes[@]}" "${runtime_owned_excludes[@]}" "${source_root}/projects/fluffles-site" "${destination_root}/projects/"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+sync_managed_exact() {
+  local source_root="$1"
+  local destination_root="$2"
+  local current_manifest="$3"
+  local desired_manifest="$4"
+  if ! remove_deleted_managed_paths "$current_manifest" "$desired_manifest" "$destination_root"; then
+    return 1
+  fi
+  if ! copy_managed "$source_root" "$destination_root" true; then
+    return 1
+  fi
+  return 0
+}
+
+# What to install and what to build is read off the tree being installed rather
+# than listed here. A release that adds a package used to need a deployer that
+# already knew its name, and the deployer performing a deploy is the one from
+# the release before it: #80 added packages/memory, the installed deployer's
+# list did not have it, and the deploy failed and rolled back every minute.
+package_plan() {
+  local root="$1"
+  "$node" - "$root" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[2];
+
+// A package is any directory that declares one, found without descending into
+// packages or into node_modules. That covers the workspace roots this repo
+// uses (., packages/*, channels/*, tasks, webhooks, chat-console, sites)
+// without naming any of them.
+const directories = [];
+const scan = (relative, depth) => {
+  if (relative !== "." && fs.existsSync(path.join(root, relative, "package.json"))) {
+    directories.push(relative);
+    return;
+  }
+  if (depth === 0) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(path.join(root, relative), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    scan(path.join(relative, entry.name), depth - 1);
+  }
+};
+if (fs.existsSync(path.join(root, "package.json"))) directories.push(".");
+scan(".", 2);
+
+// A package the runtime does not need declares that itself, so nothing here
+// has to know which directories are services and which are, say, a marketing
+// site whose install would cost the deploy a minute for nothing.
+const manifests = new Map();
+for (const directory of directories) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, directory, "package.json"), "utf8"));
+    if (manifest.fluffles?.deploy === false) continue;
+    manifests.set(directory, manifest);
+  } catch {}
+}
+
+// Services resolve a workspace package through its compiled entrypoint, so a
+// package builds only after the packages it depends on have. The order comes
+// from the declared dependencies, not from a hand-maintained sequence.
+const directoryByName = new Map();
+for (const [directory, manifest] of manifests) {
+  if (typeof manifest.name === "string") directoryByName.set(manifest.name, directory);
+}
+const dependenciesOf = (directory) => {
+  const manifest = manifests.get(directory) || {};
+  return Object.keys({ ...manifest.dependencies, ...manifest.devDependencies })
+    .map((name) => directoryByName.get(name))
+    .filter((dependency) => dependency && dependency !== directory);
+};
+const ordered = [];
+const state = new Map();
+const visit = (directory) => {
+  if (state.get(directory) === "done") return;
+  // A dependency cycle cannot be ordered; build what is reachable rather than
+  // recursing forever, and let the build itself fail if that is not enough.
+  if (state.get(directory) === "visiting") return;
+  state.set(directory, "visiting");
+  for (const dependency of dependenciesOf(directory)) visit(dependency);
+  state.set(directory, "done");
+  ordered.push(directory);
+};
+for (const directory of manifests.keys()) visit(directory);
+
+for (const directory of manifests.keys()) {
+  if (fs.existsSync(path.join(root, directory, "package-lock.json"))) {
+    process.stdout.write(`install\t${directory}\n`);
+  }
+}
+for (const directory of ordered) {
+  // The tree root is not a package: its build script is a repository-wide
+  // typecheck, which source verification has already run against the release.
+  // Running it against a live runtime typechecks whatever else the runtime
+  // happens to contain, and fails the deployment for reasons that have nothing
+  // to do with it.
+  if (directory === ".") continue;
+  if ((manifests.get(directory) || {}).scripts?.build) process.stdout.write(`build\t${directory}\n`);
+}
+NODE
+}
+
+install_dependencies() {
+  # The release says which packages exist; the runtime is only where they get
+  # installed. Reading the layout off a runtime instead picks up whatever else
+  # lives there: on dev that meant three abandoned checkouts under projects/,
+  # each declaring the repository root package, so the deploy ran the
+  # repository's own checks over a tree with merge conflicts in it and failed.
+  local plan_root="$1"
+  local root="${2:-$1}"
+  local plan
+  local action
+  local package_dir
+  if ! plan="$(package_plan "$plan_root")"; then
+    echo "deploy-main: could not read the package layout of ${plan_root}" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r action package_dir; do
+    [[ -z "$action" ]] && continue
+    # A runtime holds the managed subset of a release, not all of it: the site,
+    # the harness scripts and anything else outside the managed set are never
+    # copied there. Installing into a package the runtime does not have made npm
+    # read the runtime's own root lockfile and refuse the whole deploy, so a
+    # release only ever has its dependencies installed where it was installed.
+    [[ -f "${root}/${package_dir}/package.json" ]] || continue
+    case "$action" in
+      install)
+        [[ -f "${root}/${package_dir}/package-lock.json" ]] || continue
+        if ! npm ci --ignore-scripts --no-audit --no-fund --prefix "${root}/${package_dir}"; then
+          return 1
+        fi
+        ;;
+      build)
+        if ! npm run build --prefix "${root}/${package_dir}"; then
+          return 1
+        fi
+        ;;
+    esac
+  done <<<"$plan"
+  return 0
+}
+
+# A service whose Infisical path holds nothing cannot start at all: the
+# injection wrapper exits non-zero on a folder the vault does not have, so
+# launchd restarts the service every ThrottleInterval forever and smoke, which
+# asks whether a job is running, keeps finding one that was spawned a moment
+# ago. That is how the chat console arrived on the mini down and reported as
+# deployed. This runs on the installed release, after the files land and before
+# the services are started, because the allowlist deciding whether a path may be
+# read is itself part of the release: a path a release introduces is refused by
+# the previous release's allowlist, so proving it any earlier would fail every
+# new path. An unprovisioned path is a rolled back deploy that names it, not a
+# service left restarting forever.
+preflight_secret_paths() {
+  local source_root="$1"
+  local selections=()
+  local selection
+  local wrapper
+  local secret_path
+  local rendered
+  if ! rendered="$("$node" "${source_root}/deploy/bin/host-config.mjs" --host "$host_name" --services 2>/dev/null)"; then
+    echo "deploy-main: could not read the services ${host_name} runs" >&2
+    return 2
+  fi
+  # Each selection is the wrapper a service injects through and the path it
+  # selects, taken from the rendered command rather than assumed, so this proves
+  # the invocation launchd is about to make.
+  while IFS= read -r selection; do
+    if [[ -n "$selection" ]]; then
+      selections+=("$selection")
+    fi
+  done < <("$node" -e '
+    const services = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const selections = new Set();
+    for (const service of services) {
+      const index = service.program.indexOf("--path");
+      if (index !== -1) selections.add(`${service.program[index - 1]}\t${service.program[index + 1]}`);
+    }
+    for (const value of selections) process.stdout.write(`${value}\n`);
+  ' <<<"$rendered")
+  if [[ "${#selections[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  for selection in "${selections[@]}"; do
+    wrapper="${selection%%$'\t'*}"
+    secret_path="${selection#*$'\t'}"
+    if [[ ! -x "$wrapper" ]]; then
+      echo "deploy-main: ${wrapper} is missing, so ${secret_path} cannot be proven" >&2
+      return 2
+    fi
+    # `true` is the smallest program that proves injection succeeded, and the
+    # wrapper never prints a value: only whether the path resolved.
+    if ! "$wrapper" --path "$secret_path" /usr/bin/true >/dev/null 2>&1; then
+      unprovisioned_secret_path="$secret_path"
+      return 1
+    fi
+  done
+  return 0
+}
+
+system_daemons_installed() {
+  local label
+  # A host whose services are user jobs has no system-domain manifests to keep
+  # in step, and no privilege to install them with.
+  if [[ "$supervisor_domain" != "system" ]]; then
+    return 1
+  fi
+  for label in "${service_labels[@]}"; do
+    if [[ -f "${system_daemon_root}/${label}.plist" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+sync_system_daemons() {
+  # Keep /Library/LaunchDaemons in step with the deployed source. Daemon
+  # manifests are root-owned, so deploys route changes through the canonical
+  # installer under sudo; when the manifests are already current no privilege
+  # is needed at all.
+  local source_root="$1"
+  # Rollbacks reinstall the restored tree's manifests using the installer the
+  # candidate shipped, so the two roots are not always the same.
+  local manifest_root="${2:-$source_root}"
+  # A GUI session says nothing about where the services live. This host runs
+  # them as system daemons and has a GUI session, so skipping on GUI presence
+  # left /Library/LaunchDaemons frozen: launchd kept bootstrapping the manifest
+  # a deploy had already replaced, and every service ran a path the new tree
+  # had moved.
+  if ! system_daemons_installed; then
+    return 0
+  fi
+  local installer="${source_root}/deploy/scripts/install-system-services"
+  if [[ ! -x "$installer" || ! -x "$plistbuddy" ]]; then
+    return 0
+  fi
+  # sudo strips the environment, so the installer is told where to install
+  # rather than left to read it.
+  local installer_env=(
+    "INSTALL_SYSTEM_SERVICES_ROOT=${manifest_root}"
+    "INSTALL_SYSTEM_SERVICES_DESTINATION=${system_daemon_root}"
+    "INSTALL_SYSTEM_SERVICES_PLISTBUDDY=${plistbuddy}"
+    "INSTALL_SYSTEM_SERVICES_HOME=${home}"
+    "INSTALL_SYSTEM_SERVICES_HOST=${host_name}"
+    "INSTALL_SYSTEM_SERVICES_NODE=${node}"
+    "INSTALL_SYSTEM_SERVICES_PRIVILEGED=${DEPLOY_SYSTEM_SERVICES_PRIVILEGED:-1}"
+  )
+  if env "${installer_env[@]}" "$installer" --check >/dev/null 2>&1; then
+    return 0
+  fi
+  if sudo -n env "${installer_env[@]}" "$installer" --stage-only; then
+    return 0
+  fi
+  echo "deploy-main: system daemon manifests changed but could not be installed; run deploy/scripts/install-system-services as root" >&2
+  return 1
+}
+
+sync_launchd_files() {
+  # The user-domain copies of the host's manifests, rendered from the source
+  # being deployed rather than copied from checked-in plists, so a release
+  # that moves a program or changes a port cannot leave launchd on the old one.
+  local source_root="$1"
+  if ! mkdir -p "$agent_root"; then
+    return 1
+  fi
+  # launchd does not create the parents of StandardOutPath, so a missing log
+  # directory would silently discard the automations daemon's output.
+  if ! mkdir -p "${home}/state/automations/logs"; then
+    return 1
+  fi
+  if ! "$node" "${source_root}/deploy/bin/render-services.mjs" --host "$host_name" --out "$agent_root" >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+# A label's domain is wherever its job actually lives. The services are
+# installed as system-domain LaunchDaemons, which keep running across GUI
+# login sessions; resolving the domain from the presence of a GUI session
+# alone restarts a gui-domain copy while the real daemons keep serving old
+# code. Prefer the domain with a loaded job (system first), then fall back
+# to whichever domain has an installed manifest.
+# The per-user domain that is actually reachable from here. A GUI login session
+# has gui/<uid>; an account nobody is logged into as a human, which is what a
+# harness driven over ssh is, only has user/<uid>. Managing headless servers
+# works in either, and asking for the one that does not exist fails every
+# bootout and bootstrap.
+per_user_domain() {
+  local uid="$1"
+  if launchctl print "gui/${uid}" >/dev/null 2>&1; then
+    printf 'gui/%s' "$uid"
+  else
+    printf 'user/%s' "$uid"
+  fi
+}
+
+service_domain_for() {
+  local label="$1"
+  local uid
+  uid="$(id -u)"
+  # A user-domain host never manages a system job, even if production has one
+  # of the same name on the same machine.
+  if [[ "$supervisor_domain" != "system" ]]; then
+    per_user_domain "$uid"
+    return 0
+  fi
+  if launchctl print "system/${label}" >/dev/null 2>&1; then
+    printf 'system'
+    return 0
+  fi
+  if launchctl print "gui/${uid}" >/dev/null 2>&1 \
+    && launchctl print "gui/${uid}/${label}" >/dev/null 2>&1; then
+    printf 'gui/%s' "$uid"
+    return 0
+  fi
+  if [[ -f "${system_daemon_root}/${label}.plist" ]]; then
+    printf 'system'
+    return 0
+  fi
+  if launchctl print "gui/${uid}" >/dev/null 2>&1; then
+    printf 'gui/%s' "$uid"
+  else
+    printf 'system'
+  fi
+}
+
+launchctl_admin() {
+  # System-domain jobs need root for bootout/bootstrap/enable; the deploy
+  # account has passwordless sudo for launchctl. GUI-domain jobs are managed
+  # by the same user without privilege.
+  local domain="$1"
+  shift
+  if [[ "$domain" == "system" ]]; then
+    sudo -n launchctl "$@"
+  else
+    launchctl "$@"
+  fi
+}
+
+# Services must be fully unloaded before the managed tree changes. A stopped
+# job with KeepAlive respawns within seconds, so a service that crashes or is
+# killed while the sync is rewriting files boots against a half-synced tree
+# and crash-loops until launchd throttles it into a dead job. Bootout removes
+# the job from launchd entirely: nothing can start until start_services
+# bootstraps it against the fully converged tree.
+stop_services() {
+  local uid
+  uid="$(id -u)"
+  for label in "${service_labels[@]}"; do
+    # A job can be loaded in both domains at once (a stale gui-domain copy
+    # next to the real system daemon); every loaded copy must be unloaded or
+    # one of them boots against a half-synced tree.
+    local domains=()
+    if [[ "$supervisor_domain" == "system" ]]; then
+      domains+=(system)
+    fi
+    for candidate_domain in "gui/${uid}" "user/${uid}"; do
+      if launchctl print "$candidate_domain" >/dev/null 2>&1; then
+        domains+=("$candidate_domain")
+      fi
+    done
+    # bash 3.2 treats an empty array under set -u as unbound.
+    for domain in ${domains[@]+"${domains[@]}"}; do
+      local service="${domain}/${label}"
+      if ! launchctl print "$service" >/dev/null 2>&1; then
+        continue
+      fi
+      launchctl_admin "$domain" bootout "$service" 2>/dev/null || true
+      for (( _attempt = 0; _attempt < restart_wait_attempts; _attempt += 1 )); do
+        if ! launchctl print "$service" >/dev/null 2>&1; then
+          break
+        fi
+        sleep "$restart_wait_interval_seconds"
+      done
+      if launchctl print "$service" >/dev/null 2>&1; then
+        echo "${service} did not stop" >&2
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
+reload_service_labels() {
+  # Which services a harness runs is part of the release, so the list this
+  # deploy started with is the previous release's. Production deployed a release
+  # that added the executor daemon, started the six services it knew about, and
+  # failed smoke on the seventh: the one the release had just declared.
+  local root="$1"
+  local labels
+  if ! labels="$("$node" "${root}/deploy/bin/host-config.mjs" --shell | grep '^service_labels=')"; then
+    echo "deploy-main: could not read the services ${root} declares" >&2
+    return 1
+  fi
+  eval "$labels"
+  return 0
+}
+
+start_services() {
+  local domain
+  local plist_root
+  for label in "${service_labels[@]}"; do
+    domain="$(service_domain_for "$label")"
+    if [[ "$domain" == "system" ]]; then
+      plist_root="$system_daemon_root"
+    else
+      plist_root="$agent_root"
+    fi
+    local service="${domain}/${label}"
+    local plist="${plist_root}/${label}.plist"
+    launchctl_admin "$domain" enable "$service" >/dev/null 2>&1 || true
+    if ! launchctl print "$service" >/dev/null 2>&1; then
+      if [[ ! -f "$plist" ]]; then
+        echo "missing ${plist}; run deploy/scripts/install-system-services as root" >&2
+        return 1
+      fi
+      # launchd often rejects a bootstrap issued shortly after a bootout
+      # while the job is still tearing down, so retry like the installer.
+      local bootstrapped=0
+      for _ in {1..10}; do
+        if launchctl_admin "$domain" bootstrap "$domain" "$plist"; then
+          bootstrapped=1
+          break
+        fi
+        sleep 0.5
+      done
+      if [[ "$bootstrapped" != "1" ]]; then
+        echo "${service} could not be bootstrapped" >&2
+        return 1
+      fi
+    fi
+    launchctl_admin "$domain" kickstart -k "$service" >/dev/null 2>&1 || true
+    for (( _attempt = 0; _attempt < restart_wait_attempts; _attempt += 1 )); do
+      if launchctl print "$service" 2>/dev/null | grep -q 'state = running'; then
+        break
+      fi
+      sleep "$restart_wait_interval_seconds"
+    done
+    if ! launchctl print "$service" 2>/dev/null | grep -q 'state = running'; then
+      echo "${service} did not start" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+notify_failure() {
+  local status="$1"
+  "${home}/bin/slack-send" --channel "$alert_channel" "${host_name} deployment failed: ${status}\nreceipt: ${receipt}" >/dev/null 2>&1 || true
+}
+
+notify_drift_quarantined() {
+  "${home}/bin/slack-send" --channel "$alert_channel" "deploy-main: ${drift_count} drifted source-managed path(s) were preserved in ${quarantine_path} before converging to ${deploy_ref}. review the quarantine and open a PR for anything worth keeping." >/dev/null 2>&1 || true
+}
+
+# Copy live files that differ from the recorded manifest into a quarantine
+# directory before the converge overwrites them. Local edits are never a
+# deployable source of truth, but their content must not be silently lost.
+quarantine_managed_drift() {
+  quarantine_path="${quarantine_root}/$(date -u +%Y%m%dT%H%M%SZ)-drift"
+  if ! mkdir -p "$quarantine_path"; then
+    return 1
+  fi
+  if ! cp "$changes" "${quarantine_path}/managed-changes.json"; then
+    return 1
+  fi
+  "$node" - "$changes" "$home" "$quarantine_path" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [changesPath, runtimeRoot, quarantineRoot] = process.argv.slice(2);
+const changes = JSON.parse(fs.readFileSync(changesPath, "utf8"));
+if (![changes.added, changes.modified, changes.deleted].every(Array.isArray)) process.exit(1);
+// "modified" entries differ from the recorded manifest and "deleted" entries
+// exist only in the live tree; both carry live content worth preserving.
+// "added" entries were removed locally, so there is nothing to copy.
+for (const relative of [...changes.modified, ...changes.deleted]) {
+  const absolute = path.resolve(runtimeRoot, relative);
+  if (!absolute.startsWith(`${runtimeRoot}${path.sep}`)) throw new Error(`unsafe drift path: ${relative}`);
+  let stat;
+  try {
+    stat = fs.lstatSync(absolute);
+  } catch (error) {
+    if (error && error.code === "ENOENT") continue;
+    throw error;
+  }
+  const destination = path.join(quarantineRoot, relative);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  if (stat.isSymbolicLink()) {
+    fs.symlinkSync(fs.readlinkSync(absolute), destination);
+  } else if (stat.isFile()) {
+    fs.copyFileSync(absolute, destination);
+  }
+}
+NODE
+  return $?
+}
+
+# Preserve any local commits or uncommitted edits in the source checkout, then
+# force the checkout back onto the deployable ref. The checkout is a deployment
+# input, never a development area: merged PRs are the only path to production.
+converge_source_checkout() {
+  local head_sha
+  local stamp
+  head_sha="$(git -C "$repo" rev-parse HEAD)"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
+    local checkout_quarantine="${quarantine_root}/${stamp}-checkout"
+    if ! mkdir -p "$checkout_quarantine"; then
+      return 1
+    fi
+    if ! git -C "$repo" status --porcelain > "${checkout_quarantine}/status.txt"; then
+      return 1
+    fi
+    if ! git -C "$repo" diff HEAD > "${checkout_quarantine}/uncommitted.patch"; then
+      return 1
+    fi
+    local untracked
+    while IFS= read -r untracked; do
+      [[ -z "$untracked" ]] && continue
+      mkdir -p "${checkout_quarantine}/untracked/$(dirname "$untracked")" || return 1
+      cp -R "${repo}/${untracked}" "${checkout_quarantine}/untracked/${untracked}" || return 1
+    done < <(git -C "$repo" ls-files --others --exclude-standard)
+    echo "deploy-main: preserved uncommitted checkout changes in ${checkout_quarantine}" >&2
+  fi
+  if ! git -C "$repo" merge-base --is-ancestor "$head_sha" "$deploy_ref"; then
+    if ! git -C "$repo" branch -f "quarantine/${stamp}" "$head_sha"; then
+      return 1
+    fi
+    echo "deploy-main: preserved unmerged checkout commits on quarantine/${stamp} (${head_sha})" >&2
+  fi
+  if ! git -C "$repo" checkout --quiet --force -B "$deploy_branch" "$deploy_ref"; then
+    return 1
+  fi
+  if ! git -C "$repo" reset --quiet --hard "$deploy_ref"; then
+    return 1
+  fi
+  if ! git -C "$repo" clean --quiet -fd; then
+    return 1
+  fi
+  return 0
+}
+
+# Everything up to the handoff is the launcher's: find out what main is, put the
+# checkout and a candidate worktree on it, and let the candidate's own checks
+# decide whether it may be installed. Nothing in the live runtime is touched by
+# any of it, so a release that cannot pass its own tests costs no downtime.
+if [[ "$role" == "apply" ]]; then
+  target="$DEPLOY_APPLY_TARGET"
+  current="${DEPLOY_APPLY_CURRENT:-}"
+  recorded="$current"
+  candidate="${DEPLOY_APPLY_CANDIDATE:-$candidate}"
+  prior_lifecycle="${DEPLOY_APPLY_PRIOR_LIFECYCLE:-normal}"
+  repair_required="${DEPLOY_APPLY_REPAIR_REQUIRED:-0}"
+  if [[ "$prior_lifecycle" != "normal" ]]; then
+    admission_must_remain_blocked=1
+  fi
+  if [[ ! -d "$candidate" ]]; then
+    write_receipt false candidate_missing "$current" "$target" "$current" false "the launcher named a candidate tree that is not there: ${candidate}"
+    notify_failure candidate_missing
+    exit 1
+  fi
+  echo "deploy-main: installing ${target} with its own deployer"
+else
+
+if [[ ! -d "${repo}/.git" ]]; then
+  write_receipt false missing_repo "" "" "" false "${repo} is not a Git checkout"
+  exit 1
+fi
+
+# A host whose remote is a local mirror names where that mirror advances from
+# in mirrorUpstream, and the deployer fast-forwards it before every poll so the
+# host rolls on its own. An upstream that is unreachable right now is not a
+# failed deploy: the poll proceeds on whatever the mirror already has.
+if [[ -n "$mirror_upstream" ]]; then
+  mirror_path="$(git -C "$repo" remote get-url "$deploy_remote" || true)"
+  if ! git -C "$mirror_path" fetch --quiet "$mirror_upstream" "${deploy_branch}:${deploy_branch}"; then
+    echo "deploy-main: could not advance ${mirror_path} from ${mirror_upstream}; polling what the mirror has" >&2
+  fi
+fi
+
+if ! git -C "$repo" fetch --prune "$deploy_remote" "$deploy_branch"; then
+  write_receipt false fetch_failed "" "" "" false "could not fetch ${deploy_ref}"
+  notify_failure fetch_failed
+  exit 1
+fi
+target="$(git -C "$repo" rev-parse "$deploy_ref")"
+recorded="$(receipt_deployed_sha)"
+current="$recorded"
+
+if [[ "$dry_run" == "1" ]]; then
+  echo "deploy-main dry-run: target=${target} recorded=${recorded:-none} checkout=$(git -C "$repo" rev-parse HEAD)"
+  exit 0
+fi
+
+if ! converge_source_checkout; then
+  write_receipt false checkout_converge_failed "$current" "$target" "$current" false "could not converge the source checkout onto ${deploy_ref}"
+  notify_failure checkout_converge_failed
+  exit 1
+fi
+
+if ! prior_lifecycle="$(deployment_lifecycle_state)"; then
+  write_receipt false lifecycle_state_failed "$current" "$target" "$current" false "could not determine deployment admission state"
+  notify_failure lifecycle_state_failed
+  exit 1
+fi
+if [[ "$prior_lifecycle" != "normal" ]]; then
+  repair_required=1
+  admission_must_remain_blocked=1
+fi
+
+if [[ "$prior_lifecycle" == "normal" && -f "$manifest" ]]; then
+  if ! migrate_manifest_ownership "$manifest" "$receipt"; then
+    write_receipt false manifest_invalid "$current" "$target" "$current" false "deployed managed manifest is invalid"
+    notify_failure manifest_invalid
+    exit 1
+  fi
+fi
+
+if [[ "$repair_required" != "1" && "$recorded" == "$target" ]]; then
+  if verify_runtime_for_skip "$manifest" "$home" "$target"; then
+    write_receipt true up_to_date "$current" "$target" "$target" false "main is already deployed"
+    echo "deploy-main: up to date at ${target}"
+    exit 0
+  else
+    skip_verification_status=$?
+  fi
+  if [[ "$skip_verification_status" == "2" ]]; then
+    write_receipt false manifest_invalid "$current" "$target" "$current" false "deployed managed manifest is invalid"
+    notify_failure manifest_invalid
+    exit 1
+  fi
+  repair_required=1
+fi
+
+git -C "$repo" worktree prune
+rm -rf "$candidate"
+git -C "$repo" worktree add --detach "$candidate" "$target"
+
+# Runtime-owned toggle: `touch ~/state/deploy-main/fast-verify` skips the
+# candidate test suites (builds still gate) during rapid iteration windows;
+# remove the file to restore the full matrix. No deploy needed to flip it.
+verify_args=()
+if [[ -f "${state_dir}/fast-verify" ]]; then
+  echo "deploy-main: fast verification enabled by ${state_dir}/fast-verify; candidate test suites skipped"
+  verify_args+=(--fast)
+fi
+# The candidate's checks are about the source, including what it declares about
+# every host, so they must not inherit this run's answer to "which host am I".
+if ! env -u FLUFFLES_HOST_FILE -u FLUFFLES_HOST "$candidate/deploy/scripts/verify-source.sh" ${verify_args[@]+"${verify_args[@]}"}; then
+  write_receipt false verification_failed "$current" "$target" "$current" false "candidate source checks failed"
+  notify_failure verification_failed
+  exit 1
+fi
+
+# The release installs itself. A deploy used to be performed by the deployer of
+# the release before it, which cannot know anything the new release needs doing:
+# that is how #80 looped for half an hour. From here on the launcher only hands
+# over, and a release that needs a launcher this old cannot provide is refused
+# outright rather than installed by a deployer that predates it.
+required_contract=0
+if [[ -f "${candidate}/deploy/contract" ]]; then
+  required_contract="$(tr -d '[:space:]' < "${candidate}/deploy/contract")"
+fi
+if ! [[ "$required_contract" =~ ^[0-9]+$ ]]; then
+  write_receipt false contract_invalid "$current" "$target" "$current" false "release ${target} declares an unreadable deploy contract"
+  notify_failure contract_invalid
+  exit 1
+fi
+if [[ "$required_contract" -gt "$launcher_contract" ]]; then
+  write_receipt false launcher_too_old "$current" "$target" "$current" false "release ${target} needs launcher contract ${required_contract} and ${home}/bin/deploy-main provides ${launcher_contract}; install the release's launcher"
+  notify_failure launcher_too_old
+  exit 78
+fi
+if [[ "$required_contract" -gt "0" ]]; then
+  if [[ ! -x "${candidate}/bin/deploy-main" ]]; then
+    write_receipt false handoff_unavailable "$current" "$target" "$current" false "release ${target} declares contract ${required_contract} but ships no executable deployer"
+    notify_failure handoff_unavailable
+    exit 1
+  fi
+  write_receipt false applying "$current" "$target" "" false "handed ${target} to its own deployer"
+  set +e
+  env \
+    FLUFFLES_HOST="$host_name" \
+    DEPLOY_NODE="$node" \
+    DEPLOY_APPLY_CONTRACT="$launcher_contract" \
+    DEPLOY_APPLY_TARGET="$target" \
+    DEPLOY_APPLY_CURRENT="$current" \
+    DEPLOY_APPLY_CANDIDATE="$candidate" \
+    DEPLOY_APPLY_LOCK_TOKEN="$lock_token" \
+    DEPLOY_APPLY_PRIOR_LIFECYCLE="$prior_lifecycle" \
+    DEPLOY_APPLY_REPAIR_REQUIRED="$repair_required" \
+    "${candidate}/bin/deploy-main" --apply
+  apply_status=$?
+  set -e
+  # A deployer that died without writing its own receipt would otherwise leave
+  # the run looking like it is still going.
+  if [[ "$apply_status" != "0" && "$(receipt_status)" == "applying" ]]; then
+    write_receipt false handoff_incomplete "$current" "$target" "$current" false "the deployer of ${target} exited ${apply_status} without recording an outcome"
+    notify_failure handoff_incomplete
+  fi
+  exit "$apply_status"
+fi
+
+# A release older than the handoff, which is every release before this one and
+# any release a rollback returns to, is installed by this launcher itself.
+fi
+
+# Only that release is installed from the checkout's own code, so only that
+# release needs the checkout's workspace dependencies resolved: its task_control
+# runs from there. Building the release's packages inside the checkout is
+# otherwise the launcher doing the release's work with the release's build
+# scripts, which is the whole thing the handoff exists to stop.
+checkout_deps_marker="${state_dir}/checkout-deps-sha"
+checkout_head="$(git -C "$repo" rev-parse HEAD)"
+if [[ "$(cat "$checkout_deps_marker" 2>/dev/null || true)" != "$checkout_head" ]]; then
+  if ! install_dependencies "$repo"; then
+    write_receipt false checkout_dependencies_failed "$current" "$target" "$current" false "could not install source checkout dependencies"
+    notify_failure checkout_dependencies_failed
+    exit 1
+  fi
+  printf '%s\n' "$checkout_head" > "$checkout_deps_marker"
+fi
+
+if ! task_control set draining >/dev/null; then
+  write_receipt false drain_start_failed "$current" "$target" "$current" false "could not enter deployment drain mode"
+  notify_failure drain_start_failed
+  exit 1
+fi
+drain_active=1
+# Draining runs checkpoint themselves at their next safe turn boundary. If
+# the timeout still expires, the deployment proceeds: any run that is still
+# active is durably recorded and will be recovered as interrupted work after
+# restart, so a stuck model process can no longer block deployment forever.
+if ! task_control wait-idle --timeout-ms "$drain_timeout_ms" --interval-ms "$drain_interval_ms"; then
+  drain_forced=true
+  echo "deploy-main: drain timed out; proceeding, remaining runs will be recovered as interrupted after restart" >&2
+fi
+if ! task_control set deploying >/dev/null; then
+  write_receipt false drain_state_failed "$current" "$target" "$current" false "could not enter deploying state"
+  notify_failure drain_state_failed
+  exit 1
+fi
+
+if ! write_managed_manifest "$candidate" "$candidate_manifest" "$target"; then
+  write_receipt false manifest_generation_failed "$current" "$target" "$current" false "could not generate the candidate managed manifest"
+  notify_failure manifest_generation_failed
+  exit 1
+fi
+if ! candidate_manifest_sha="$(manifest_sha_for "$candidate_manifest")"; then
+  write_receipt false manifest_generation_failed "$current" "$target" "$current" false "candidate managed manifest is invalid"
+  notify_failure manifest_generation_failed
+  exit 1
+fi
+
+# Merged source is the only deployable truth. Live edits to source-managed
+# files are preserved in a quarantine for review, then converged over; they
+# can return only through a PR merged on fluffles-source.
+if [[ -f "$manifest" ]]; then
+  if ! recorded_manifest_sha="$(manifest_sha_for "$manifest")"; then
+    write_receipt false manifest_invalid "$current" "$target" "$current" false "deployed managed manifest is invalid"
+    notify_failure manifest_invalid
+    exit 1
+  fi
+  manifest_sha="$recorded_manifest_sha"
+  if drift_count="$(check_managed_drift "$manifest" "$home")"; then
+    :
+  else
+    drift_status=$?
+    if [[ "$drift_status" == "2" ]]; then
+      write_receipt false drift_check_failed "$current" "$target" "$current" false "could not compare the managed runtime tree to the deployed manifest"
+      notify_failure drift_check_failed
+      exit 1
+    fi
+    drift_detected=true
+    if ! quarantine_managed_drift; then
+      write_receipt false quarantine_failed "$current" "$target" "$current" false "could not preserve drifted source-managed files before converging"
+      notify_failure quarantine_failed
+      exit 1
+    fi
+    echo "deploy-main: preserved ${drift_count} drifted source-managed path(s) in ${quarantine_path}" >&2
+    notify_drift_quarantined
+  fi
+fi
+
+if ! write_managed_manifest "$home" "$runtime_manifest" "$current"; then
+  write_receipt false runtime_manifest_failed "$current" "$target" "$current" false "could not snapshot the managed runtime tree"
+  notify_failure runtime_manifest_failed
+  exit 1
+fi
+if ! write_managed_changes "$runtime_manifest" "$candidate_manifest" "$changes"; then
+  write_receipt false change_plan_failed "$current" "$target" "$current" false "could not calculate managed source changes"
+  notify_failure change_plan_failed
+  exit 1
+fi
+
+backup="${backups}/$(date -u +%Y%m%dT%H%M%SZ)-${current}"
+if ! mkdir -p "$backup" || ! copy_managed "$home" "$backup"; then
+  write_receipt false backup_failed "$current" "$target" "$current" false "could not back up the managed runtime tree"
+  notify_failure backup_failed
+  exit 1
+fi
+if ! cp "$runtime_manifest" "${backup}/runtime-manifest.json"; then
+  write_receipt false backup_failed "$current" "$target" "$current" false "could not back up the managed runtime manifest"
+  notify_failure backup_failed
+  exit 1
+fi
+had_manifest=0
+if [[ -f "$manifest" ]]; then
+  if ! cp "$manifest" "${backup}/managed-manifest.json"; then
+    write_receipt false backup_failed "$current" "$target" "$current" false "could not back up the deployed managed manifest"
+    notify_failure backup_failed
+    exit 1
+  fi
+  had_manifest=1
+fi
+
+rollback() {
+  local status="$1"
+  local rollback_ok=1
+  local receipt_status="$status"
+  local receipt_deployed_sha="$current"
+  local receipt_message="deployment failed and the prior files were restored and verified"
+  admission_must_remain_blocked=1
+  set +e
+  # The restore rewrites the same managed tree the deploy touched, so the
+  # services must be unloaded here too; smoke-failure rollbacks arrive with
+  # the services running.
+  if ! stop_services; then
+    rollback_ok=0
+  fi
+  if ! sync_managed_exact "$backup" "$home" "$candidate_manifest" "${backup}/runtime-manifest.json"; then
+    rollback_ok=0
+  fi
+  # A rollback only counts if the live tree provably matches the backup. On a
+  # mismatch, retry once against a fresh snapshot of whatever is actually on
+  # disk, so a partial first pass cannot leave a hybrid runtime undetected.
+  if [[ "$rollback_ok" == "1" ]] && ! runtime_matches_manifest "${backup}/runtime-manifest.json" "$home"; then
+    if ! write_managed_manifest "$home" "$runtime_manifest" rollback \
+      || ! sync_managed_exact "$backup" "$home" "$runtime_manifest" "${backup}/runtime-manifest.json" \
+      || ! runtime_matches_manifest "${backup}/runtime-manifest.json" "$home"; then
+      rollback_ok=0
+    fi
+  fi
+  if [[ "$had_manifest" == "1" ]]; then
+    if ! cp "${backup}/managed-manifest.json" "$manifest"; then
+      rollback_ok=0
+    elif ! manifest_sha="$(manifest_sha_for "$manifest")"; then
+      rollback_ok=0
+    fi
+  else
+    if ! rm -f "$manifest"; then
+      rollback_ok=0
+    else
+      manifest_sha=""
+    fi
+  fi
+  # The restore puts the prior manifests back in the tree, but launchd starts
+  # services from the installed copies, so those have to come back too or the
+  # rollback boots the failed candidate's job definitions.
+  if ! sync_launchd_files "$home" || ! sync_system_daemons "$candidate" "$home"; then
+    rollback_ok=0
+  fi
+  # The restored release describes its own layout, which is the one now on disk.
+  if ! install_dependencies "$backup" "$home"; then
+    rollback_ok=0
+  fi
+  # A rollback restores whatever tree was installed before, which may predate
+  # the automations registry entirely. Its sync step is therefore best effort:
+  # refusing to finish a rollback because the older tree has no registry would
+  # leave the machine half-restored with admission control still closed.
+  if [[ -x "${home}/bin/automations" ]] && ! "${home}/bin/automations" sync; then
+    rollback_ok=0
+  fi
+  # The restored release declares its own services, which is again the list on
+  # disk: a service the failed release added is not waited on, and one it
+  # removed comes back.
+  if ! reload_service_labels "$home"; then
+    rollback_ok=0
+  fi
+  if ! task_control set restarting >/dev/null; then
+    rollback_ok=0
+  fi
+  if ! start_services; then
+    rollback_ok=0
+  fi
+  if [[ "$rollback_ok" == "1" ]]; then
+    local rollback_smoke_ok=0
+    local rollback_attempt=0
+    while [[ "$rollback_attempt" -lt "$smoke_attempts" ]]; do
+      rollback_attempt=$((rollback_attempt + 1))
+      if "${home}/bin/smoke" --quiet --deploy; then
+        rollback_smoke_ok=1
+        break
+      fi
+      sleep "$smoke_interval_seconds"
+    done
+    if [[ "$rollback_smoke_ok" != "1" ]]; then
+      rollback_ok=0
+    fi
+  fi
+  if [[ "$rollback_ok" == "1" ]]; then
+    if ! resume_normal; then
+      rollback_ok=0
+    else
+      admission_must_remain_blocked=0
+    fi
+  fi
+  if [[ "$rollback_ok" != "1" ]]; then
+    receipt_status="rollback_failed"
+    receipt_deployed_sha=""
+    manifest_sha=""
+    receipt_message="deployment failed (${status}); rollback was incomplete and runtime admission remains blocked"
+  fi
+  write_receipt false "$receipt_status" "$current" "$target" "$receipt_deployed_sha" true "$receipt_message"
+  notify_failure "$receipt_status"
+  set -e
+  return 0
+}
+
+admission_must_remain_blocked=1
+if ! task_control set restarting >/dev/null || ! stop_services; then
+  rollback stop_failed
+  exit 1
+fi
+
+if ! sync_managed_exact "$candidate" "$home" "$runtime_manifest" "$candidate_manifest" \
+  || ! sync_launchd_files "$home" \
+  || ! sync_system_daemons "$candidate" \
+  || ! install_dependencies "$candidate" "$home" \
+  || ! reload_service_labels "$home" \
+  || ! "${home}/bin/automations" sync; then
+  rollback apply_failed
+  exit 1
+fi
+
+if ! preflight_secret_paths "$home"; then
+  if [[ -n "${unprovisioned_secret_path:-}" ]]; then
+    echo "deploy-main: ${unprovisioned_secret_path} is declared by ${target} but does not resolve in the vault" >&2
+  fi
+  rollback secrets_unprovisioned
+  exit 1
+fi
+
+if ! start_services; then
+  rollback restart_failed
+  exit 1
+fi
+
+write_receipt false verifying "$current" "$target" "" false "candidate copied; smoke test running"
+smoke_ok=0
+smoke_attempt=0
+while [[ "$smoke_attempt" -lt "$smoke_attempts" ]]; do
+  smoke_attempt=$((smoke_attempt + 1))
+  if "${home}/bin/smoke" --quiet --deploy; then
+    smoke_ok=1
+    break
+  fi
+  sleep "$smoke_interval_seconds"
+done
+if [[ "$smoke_ok" != "1" ]]; then
+  rollback smoke_failed
+  exit 1
+fi
+
+if ! persist_manifest "$candidate_manifest" "$manifest"; then
+  rollback manifest_persist_failed
+  exit 1
+fi
+manifest_sha="$candidate_manifest_sha"
+
+if ! resume_normal; then
+  write_receipt false resume_normal_failed "$current" "$target" "$target" false "deployment completed but could not reopen runtime admission"
+  notify_failure resume_normal_failed
+  exit 1
+fi
+admission_must_remain_blocked=0
+# Directories the source no longer manages at these locations (they moved under
+# channels/, tools/, packages/ and deploy/). The managed-manifest diff cannot
+# see paths that left managed_paths, so a converged home sheds them here, after
+# the smoke gate, where a rollback no longer needs them.
+legacy_managed_paths=(
+  chat-console
+  communications
+  executor
+  jobs
+  smoke
+  tasks
+  webhooks
+)
+for legacy in "${legacy_managed_paths[@]}"; do
+  rm -rf "${home:?}/${legacy}" 2>/dev/null || true
+done
+write_receipt true deployed "$current" "$target" "$target" false "main deployed and smoke passed"
+find "$backups" -mindepth 1 -maxdepth 1 -type d -print0 \
+  | xargs -0 ls -dt 2>/dev/null \
+  | tail -n +6 \
+  | xargs rm -rf 2>/dev/null || true
+find "$quarantine_root" -mindepth 1 -maxdepth 1 -type d -print0 \
+  | xargs -0 ls -dt 2>/dev/null \
+  | tail -n +21 \
+  | xargs rm -rf 2>/dev/null || true
+echo "deploy-main: deployed ${target}"

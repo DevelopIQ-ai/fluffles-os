@@ -1,0 +1,71 @@
+# shellcheck shell=sh
+
+spec_state_prefix="amalgm-auth"
+spec_component="amalgm"
+spec_require="AMALGM_AUTH_JSON"
+spec_files="AMALGM_AUTH_JSON:auth.json"
+spec_exec="${home}/homebrew/bin/node"
+spec_exec_arguments="${home}/tools/payloads/npm/amalgm/node_modules/amalgm/bin/amalgm.js"
+
+spec_validate() {
+  if ! "$node_bin" - "${temporary_dir}/auth.json" <<'NODE'
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!value || typeof value !== "object" || Array.isArray(value)
+  || !value.machine || typeof value.machine.token !== "string" || !value.machine.token) process.exit(1);
+NODE
+  then
+    echo "amalgm: injected auth state is invalid" >&2
+    exit 78
+  fi
+}
+
+spec_prepare() {
+  # AMALGM_DIR owns workflows, automations, configuration and runtime state, so
+  # it must remain the native persistent directory. The provider has no
+  # auth-file override, so the injected document is placed there under an
+  # exclusive lock and removed again on exit.
+  amalgm_home="${AMALGM_HOME:-${home}/.amalgm}"
+  amalgm_dir="${AMALGM_DIR:-${amalgm_home}/users/${AMALGM_RUNTIME_USER_ID:-local}}"
+  if [ ! -d "$amalgm_dir" ] || [ -L "$amalgm_dir" ]; then
+    echo "amalgm: invalid persistent runtime directory: $amalgm_dir" >&2
+    exit 78
+  fi
+
+  # Every amalgm invocation materializes auth under this lock, and cron fires
+  # several of them a minute, so wrappers queue for the lock instead of failing
+  # the caller the moment another short-lived invocation holds it.
+  lock_wait_seconds="${AMALGM_AUTH_LOCK_WAIT_SECONDS:-60}"
+  case "$lock_wait_seconds" in
+    ''|*[!0-9]*) lock_wait_seconds=60 ;;
+  esac
+  if ! acquire_lock "${amalgm_dir}/.infisical-auth.lock" "$lock_wait_seconds"; then
+    lock_status=$?
+    echo "amalgm: another invocation owns the native auth materialization lock" >&2
+    exit "$lock_status"
+  fi
+
+  # The helper marks ownership before atomically placing the secret. On a hard
+  # kill, the next wrapper can remove only the stale file that this flow owns.
+  spec_persistent_dir="$amalgm_dir"
+  auth_file="$("${bin_dir}/auth-temp-state" materialize-persistent \
+    "$amalgm_dir" "${temporary_dir}/auth.json" "$$")" || exit $?
+  # The provider rewrites the persistent copy, so that is what a push compares
+  # against the before-image taken from the injected value.
+  spec_push="/services/amalgm:AMALGM_AUTH_JSON:${auth_file}"
+
+  export AMALGM_HOME="$amalgm_home"
+  export AMALGM_DIR="$amalgm_dir"
+  export AMALGM_FS_ROOTS="${home}"
+  export AMALGM_WORKSPACES_DIR="${AMALGM_WORKSPACES_DIR:-${amalgm_dir}/workspaces}"
+  export AMALGM_PROJECTS_DIR="${AMALGM_PROJECTS_DIR:-$AMALGM_WORKSPACES_DIR}"
+  export AMALGM_DEFAULT_CWD="${AMALGM_DEFAULT_CWD:-${home}}"
+  export AMALGM_BIND_HOST="${AMALGM_BIND_HOST:-127.0.0.1}"
+  export AMALGM_DISABLE_AUTO_UPDATE="1"
+
+  cert_path="${home}/homebrew/etc/ca-certificates/cert.pem"
+  if [ -f "$cert_path" ]; then
+    export NODE_EXTRA_CA_CERTS="$cert_path"
+    export SSL_CERT_FILE="$cert_path"
+  fi
+}

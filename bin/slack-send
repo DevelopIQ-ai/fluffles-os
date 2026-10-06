@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+if [ -z "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f /etc/ssl/cert.pem ]; then
+  export NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem
+fi
+
+cd "${home}"
+exec "${home}/packages/auth/bin/infisical-run" --path /services/slack-send -- "${home}/homebrew/bin/node" --import tsx "${home}/tools/slack-send/bin/slack-send.ts" "$@"

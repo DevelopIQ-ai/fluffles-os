@@ -1,0 +1,64 @@
+{
+  "name": "logs",
+  "description": "Fluffles service logs and receipts: inventory, launchd state, tails, and automation receipts.",
+  "tools": [
+    {
+      "name": "logs.inventory",
+      "description": "List every known log stream.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/logs", "inventory"]
+    },
+    {
+      "name": "logs.launchd",
+      "description": "Show launchd state for the harness services.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/logs", "launchd"]
+    },
+    {
+      "name": "logs.tail",
+      "description": "Tail one named log stream.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "log stream name, e.g. slack-stderr" },
+          "lines": { "type": "number", "description": "number of lines (default 40)" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/logs", "tail", "{name}", "--lines {lines?}"]
+    },
+    {
+      "name": "logs.receipt",
+      "description": "Show the latest receipt for a named producer, e.g. an automation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "receipt producer name" }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/logs", "receipt", "{name}"]
+    },
+    {
+      "name": "logs.health",
+      "description": "Report log surface health.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/logs", "health"]
+    }
+  ],
+  "health": ["{{HOME}}/bin/logs", "health"]
+}

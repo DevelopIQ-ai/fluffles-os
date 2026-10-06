@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+cd "${home}/channels/email"
+exec "${home}/packages/auth/bin/infisical-run" --path /services/email-channel -- "${home}/homebrew/bin/node" --import tsx "${home}/channels/email/src/server.ts" "$@"

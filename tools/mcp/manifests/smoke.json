@@ -1,0 +1,17 @@
+{
+  "name": "smoke",
+  "description": "Fluffles harness smoke checks: prove the core organs are alive without touching real channels.",
+  "tools": [
+    {
+      "name": "smoke.run",
+      "description": "Run the standard smoke suite and return the machine-readable receipt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "command": ["{{HOME}}/bin/smoke", "--json", "--quiet"],
+      "timeoutMs": 300000
+    }
+  ]
+}

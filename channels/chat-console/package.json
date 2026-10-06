@@ -1,0 +1,27 @@
+{
+  "name": "fluffles-chat-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local chat visibility console for Fluffles channel conversations.",
+  "main": "src/server.ts",
+  "scripts": {
+    "start": "node --import tsx src/server.ts",
+    "build": "tsc -p tsconfig.json --noEmit && npm run build:web",
+    "build:web": "npm ci --ignore-scripts --no-audit --no-fund --prefix web && npm run build --prefix web",
+    "check": "npm run build",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "@fluffles/automations": "file:../../packages/automations",
+    "@fluffles/capabilities": "file:../../packages/capabilities",
+    "@fluffles/tasks": "file:../../packages/tasks"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

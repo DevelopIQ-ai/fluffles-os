@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# Which harness this is comes from the account the wrapper runs as, so the
+# same file serves production and the dev harness.
+home="${FLUFFLES_HOME:-${HOME:?HOME must be set}}"
+
+# The executor cli resolves node through the environment, and callers such as
+# launchd and the tool-health runner do not have the harness node on PATH.
+PATH="${home}/homebrew/bin:${PATH:-/usr/bin:/bin}"
+export PATH
+
+exec "${home}/deploy/executor/node_modules/.bin/executor" mcp "$@"
